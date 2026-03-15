@@ -1,0 +1,101 @@
+---
+title: "Example Gallery"
+description: "Browse all Runar examples."
+section: "examples"
+order: 10
+lang: "en"
+---
+
+This gallery provides an overview of all available Runar example contracts. Each example includes the full annotated source code with line-by-line explanations, test code, and deployment instructions. The examples progress from simple stateful contracts to advanced patterns involving oracles, game logic, and multi-party betting.
+
+## Beginner Examples
+
+### [Counter](/docs/en/examples/counter)
+
+A minimal stateful contract that maintains an integer counter. Demonstrates `StatefulSmartContract`, mutable state, and the `increment`/`decrement` pattern. This is the "Hello World" of stateful contracts and the best place to start if you are new to state management in Runar.
+
+**Concepts:** `StatefulSmartContract`, mutable state, assertions, state continuation
+
+**Difficulty:** Beginner
+
+---
+
+### [Auction](/docs/en/examples/auction)
+
+An on-chain English auction where bidders compete by spending the current auction UTXO with a higher bid. The covenant enforces that each bid exceeds the previous one and that bidding stops after the deadline. The auctioneer can close the auction at any time.
+
+**Concepts:** Stateful bidding, `extractLocktime` for deadlines, multi-party interaction, competitive state transitions
+
+**Difficulty:** Intermediate
+
+## Advanced Examples
+
+### [Tic-Tac-Toe](/docs/en/examples/token-swap)
+
+A complete two-player Tic-Tac-Toe game running entirely on-chain. Players take turns placing marks on a 3x3 board, with the contract enforcing turn order, move validity, win detection, and pot distribution. Demonstrates complex state management with nine board cells, turn tracking, and multiple exit conditions (win, tie, cancel).
+
+**Concepts:** Game state management, turn-based logic, win condition verification, multi-exit stateful contract
+
+**Difficulty:** Advanced
+
+---
+
+### [Blackjack Betting](/docs/en/examples/multi-sig-wallet)
+
+An oracle-attested blackjack betting contract where a player wagers against a house. The game outcome is verified using a Rabin oracle signature, with different settlement methods for blackjack (3:2 payout), regular wins, losses, and mutual cancellation. Demonstrates the Rabin oracle pattern for verifiable off-chain data.
+
+**Concepts:** Rabin oracle signatures, `verifyRabinSig`, off-chain game verification, multi-path settlement
+
+**Difficulty:** Advanced
+
+---
+
+### [Price Bet](/docs/en/examples/payment-channel)
+
+A binary options-style price wager between two parties. An oracle attests to the current price of an asset, and the contract pays out to Alice if the price exceeds a strike price, or to Bob otherwise. Demonstrates oracle-driven conditional logic and cooperative cancellation.
+
+**Concepts:** Rabin oracle price feeds, strike price comparison, binary outcome settlement, cooperative cancellation
+
+**Difficulty:** Advanced
+
+## Running the Examples Locally
+
+All examples follow the standard Runar project structure. To run any example:
+
+```bash
+# Clone or create the project
+runar init my-examples
+cd my-examples
+
+# Copy the contract source into contracts/
+# Copy the test file into tests/
+
+# Install dependencies
+pnpm install
+
+# Compile the contract
+runar compile contracts/<ContractName>.runar.ts --output ./artifacts
+
+# Run tests
+runar test
+
+# Deploy to testnet (optional)
+runar deploy ./artifacts/<ContractName>.json \
+  --network testnet \
+  --key <your-WIF-key> \
+  --satoshis 10000
+```
+
+Each example page includes the complete contract source and test code that you can copy directly into your project.
+
+## Example Progression
+
+If you are learning Runar, we recommend working through the examples in this order:
+
+1. **Counter** -- Understand basic stateful contracts and mutable state
+2. **Auction** -- Learn competitive multi-party interactions with deadlines
+3. **Tic-Tac-Toe** -- Explore complex game state and multiple exit paths
+4. **Blackjack Betting** -- Understand oracle integration with Rabin signatures
+5. **Price Bet** -- Combine oracles with binary outcome settlement
+
+Before diving into the examples, make sure you have completed the [tutorials](/docs/en/tutorials/hello-world), which cover the fundamentals: project setup, compilation, testing, and deployment.

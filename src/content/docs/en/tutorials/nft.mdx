@@ -1,0 +1,324 @@
+---
+title: "NFT Contract"
+description: "Create a non-fungible token."
+section: "tutorials"
+order: 30
+lang: "en"
+---
+
+This tutorial guides you through building a non-fungible token (NFT) contract on BSV with Runar. Each token is a unique UTXO with immutable metadata, transferable ownership enforced by a covenant, and an owner-initiated burn operation.
+
+By the end of this tutorial, you will understand:
+
+- How to combine `readonly` and mutable properties in a `StatefulSmartContract`
+- How immutable metadata is embedded in the locking script alongside mutable ownership state
+- How the `transfer` covenant ensures correct state propagation
+- How to implement a `burn` method that permanently destroys a token
+
+## Prerequisites
+
+- Completed the [Hello World Tutorial](/docs/en/tutorials/hello-world) and the [Fungible Token Tutorial](/docs/en/tutorials/fungible-token)
+- Understanding of `StatefulSmartContract`, `checkPreimage`, and `extractOutputHash`
+
+## Designing the NFT Contract
+
+An NFT differs from a fungible token in two important ways:
+
+1. **Uniqueness** -- Each NFT has a `tokenId` and `metadata` that never change. These are `readonly` properties.
+2. **Indivisibility** -- You cannot split an NFT. You transfer the whole thing or you don't.
+
+The contract state:
+
+| Property | Type | Mutability | Description |
+| --- | --- | --- | --- |
+| `tokenId` | `ByteString` | `readonly` | Unique identifier for this token |
+| `metadata` | `ByteString` | `readonly` | On-chain metadata (name, description, image hash, etc.) |
+| `owner` | `PubKey` | mutable | Current owner's public key |
+
+The contract methods:
+
+| Method | Description |
+| --- | --- |
+| `transfer` | Transfer ownership to a new public key |
+| `burn` | Permanently destroy the token |
+
+## Writing the Contract
+
+Create `contracts/NFT.runar.ts`:
+
+```typescript
+import {
+  StatefulSmartContract,
+  assert,
+  PubKey,
+  Sig,
+  ByteString,
+  checkSig,
+  SigHashPreimage,
+  checkPreimage,
+  extractOutputHash,
+  hash256,
+} from 'runar-lang';
+
+class NFTExample extends StatefulSmartContract {
+  readonly tokenId: ByteString;
+  readonly metadata: ByteString;
+  owner: PubKey;
+
+  constructor(tokenId: ByteString, metadata: ByteString, owner: PubKey) {
+    super(tokenId, metadata, owner);
+    this.tokenId = tokenId;
+    this.metadata = metadata;
+    this.owner = owner;
+  }
+
+  public transfer(sig: Sig, newOwner: PubKey, txPreimage: SigHashPreimage) {
+    assert(checkSig(sig, this.owner));
+    assert(checkPreimage(txPreimage));
+
+    this.owner = newOwner;
+    this.addOutput(1n, this.tokenId, this.metadata, this.owner);
+
+    const expectedHash = hash256(this.buildStateOutput());
+    assert(extractOutputHash(txPreimage) === expectedHash);
+  }
+
+  public burn(sig: Sig) {
+    assert(checkSig(sig, this.owner));
+  }
+}
+
+export { NFTExample };
+```
+
+### Walkthrough
+
+#### Readonly vs. Mutable Properties
+
+```typescript
+readonly tokenId: ByteString;
+readonly metadata: ByteString;
+owner: PubKey;
+```
+
+This is the key design pattern for NFTs. The `tokenId` and `metadata` are permanent -- they are baked into the locking script and never change across the token's lifetime. The `owner` is mutable -- it updates with each transfer.
+
+When the token is transferred, the new output's locking script still contains the same `tokenId` and `metadata`, but with the updated `owner`. This is how the covenant preserves the token's identity across transactions.
+
+#### The `transfer` Method
+
+```typescript
+public transfer(sig: Sig, newOwner: PubKey, txPreimage: SigHashPreimage) {
+  assert(checkSig(sig, this.owner));
+  assert(checkPreimage(txPreimage));
+
+  this.owner = newOwner;
+  this.addOutput(1n, this.tokenId, this.metadata, this.owner);
+
+  const expectedHash = hash256(this.buildStateOutput());
+  assert(extractOutputHash(txPreimage) === expectedHash);
+}
+```
+
+Step by step:
+
+1. **Authorization** -- `checkSig(sig, this.owner)` verifies only the current owner can transfer.
+2. **Preimage verification** -- `checkPreimage(txPreimage)` enables covenant enforcement.
+3. **State update** -- `this.owner = newOwner` changes the mutable state.
+4. **Output specification** -- `addOutput(1n, this.tokenId, this.metadata, this.owner)` defines the new UTXO. Notice all three values are included -- the readonly `tokenId` and `metadata` along with the updated `owner`.
+5. **Covenant check** -- The `extractOutputHash` assertion guarantees the spending transaction creates exactly this output. The spender cannot tamper with the token's identity or redirect it.
+
+#### The `burn` Method
+
+```typescript
+public burn(sig: Sig) {
+  assert(checkSig(sig, this.owner));
+}
+```
+
+Burn is deliberately simple. It requires the owner's signature and nothing else. There is no `addOutput` call and no preimage verification. When this method is called, the UTXO is spent without creating a continuation output -- the token ceases to exist.
+
+This is the difference between a stateful method (which constrains outputs) and a terminal method (which does not). Both are valid public methods; the difference is whether the contract continues.
+
+## Compiling
+
+```bash
+runar compile contracts/NFT.runar.ts --output ./artifacts --asm
+```
+
+## Testing the NFT
+
+Create `tests/NFT.test.ts`:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('NFTExample', () => {
+  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
+  const bobKey = bsv.PrivateKey.fromRandom('testnet');
+  const alicePub = aliceKey.toPublicKey().toString();
+  const bobPub = bobKey.toPublicKey().toString();
+
+  const tokenId = '0001';
+  const metadata = Buffer.from(
+    JSON.stringify({ name: 'Runar Genesis', description: 'First NFT' })
+  ).toString('hex');
+
+  it('should transfer ownership to a new owner', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/NFT.runar.ts',
+      'NFTExample'
+    );
+
+    const instance = contract.create(tokenId, metadata, alicePub);
+
+    const result = await instance.call('transfer', {
+      sig: instance.sign(aliceKey),
+      newOwner: bobPub,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(true);
+    // The output should have Bob as the new owner
+    expect(result.outputs).toHaveLength(1);
+  });
+
+  it('should reject transfer by non-owner', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/NFT.runar.ts',
+      'NFTExample'
+    );
+
+    const instance = contract.create(tokenId, metadata, alicePub);
+
+    // Bob tries to transfer Alice's NFT
+    const result = await instance.call('transfer', {
+      sig: instance.sign(bobKey),
+      newOwner: bobPub,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should allow owner to burn the token', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/NFT.runar.ts',
+      'NFTExample'
+    );
+
+    const instance = contract.create(tokenId, metadata, alicePub);
+
+    const result = await instance.call('burn', {
+      sig: instance.sign(aliceKey),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject burn by non-owner', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/NFT.runar.ts',
+      'NFTExample'
+    );
+
+    const instance = contract.create(tokenId, metadata, alicePub);
+
+    const result = await instance.call('burn', {
+      sig: instance.sign(bobKey),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should preserve tokenId and metadata across transfers', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/NFT.runar.ts',
+      'NFTExample'
+    );
+
+    const instance = contract.create(tokenId, metadata, alicePub);
+
+    // Transfer from Alice to Bob
+    const result = await instance.call('transfer', {
+      sig: instance.sign(aliceKey),
+      newOwner: bobPub,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(true);
+    // The output script still contains the original tokenId and metadata
+    // but with the updated owner (Bob)
+  });
+});
+```
+
+Run the tests:
+
+```bash
+runar test
+```
+
+## Metadata Design Considerations
+
+The `metadata` field is a raw `ByteString`. You have full flexibility in what you store:
+
+**On-chain metadata (small tokens):**
+```typescript
+const metadata = Buffer.from(JSON.stringify({
+  name: 'Runar Genesis #1',
+  description: 'The first NFT minted on Runar',
+  image: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
+  attributes: { rarity: 'legendary', edition: 1 }
+})).toString('hex');
+```
+
+**On-chain hash with off-chain data (large tokens):**
+```typescript
+// Store only the hash of the metadata; full data lives off-chain
+const metadataHash = bsv.crypto.Hash.sha256(
+  Buffer.from(JSON.stringify(fullMetadata))
+).toString('hex');
+```
+
+Both approaches are valid. On-chain metadata is fully self-contained but costs more in transaction fees. Hash-only metadata is cheaper but requires an external service to resolve the full data.
+
+Because `metadata` is `readonly`, it is immutable for the token's lifetime. This is by design -- NFT metadata should not change after minting. If you need updateable metadata, you would use a separate mutable property (but consider whether that undermines the NFT's trustworthiness).
+
+## Deploying the NFT
+
+```bash
+runar compile contracts/NFT.runar.ts --output ./artifacts
+
+runar deploy ./artifacts/NFTExample.json \
+  --network testnet \
+  --key <your-WIF-private-key> \
+  --satoshis 1
+```
+
+After deployment, the returned TxID identifies the token. The `tokenId` you passed to the constructor is embedded in the locking script and serves as the token's on-chain identifier.
+
+## NFT Lifecycle
+
+1. **Mint** -- Deploy the contract with a unique `tokenId`, `metadata`, and the creator as `owner`.
+2. **Transfer** -- The owner calls `transfer` with a new owner's public key. The covenant creates a new UTXO with the same token identity but updated ownership.
+3. **Transfer chain** -- Each subsequent owner can transfer to the next. The `tokenId` and `metadata` remain constant through every transfer.
+4. **Burn** -- Any owner in the chain can burn the token. The UTXO is spent without creating a continuation output, and the token is permanently destroyed.
+
+## Key Concepts Recap
+
+| Concept | What You Learned |
+| --- | --- |
+| `readonly` + mutable | Combining immutable identity with mutable ownership in one contract |
+| NFT identity | `tokenId` and `metadata` as permanent, covenant-enforced properties |
+| Transfer covenant | `addOutput` + `extractOutputHash` ensures correct state propagation |
+| Terminal methods | `burn` spends the UTXO without creating a continuation output |
+| `ByteString` | Variable-length byte type for arbitrary on-chain data |
+
+## What's Next
+
+- [Multi-Party Escrow Tutorial](/docs/en/tutorials/multi-party-escrow) -- Learn multi-signature patterns with three-party escrow
+- [Auction Example](/docs/en/examples/auction) -- See a stateful contract with competitive bidding and deadlines
+- [Example Gallery](/docs/en/examples/gallery) -- Browse all annotated contract examples

@@ -1,0 +1,199 @@
+---
+title: "Covenant Architecture"
+description: "Advanced UTXO covenant patterns."
+section: "advanced"
+order: 10
+lang: "en"
+---
+
+Covenants are Bitcoin Script patterns that constrain how a UTXO can be spent, including what outputs the spending transaction must create. They are the foundation of stateful and composable contracts on BSV. This page covers how covenants work at the script level, how Runar makes them ergonomic to write, and the architectural patterns they enable.
+
+## What Is a Covenant?
+
+In standard Bitcoin, a locking script only constrains *who* can spend a UTXO -- typically by requiring a valid signature from a specific public key. A covenant goes further: it constrains *how* the UTXO is spent, including the structure of the spending transaction itself.
+
+A covenant can enforce rules like:
+- The spending transaction must create an output with a specific locking script
+- The output must contain at least a minimum amount of satoshis
+- The transaction must have a specific number of inputs or outputs
+- The spending transaction must send funds to a particular address
+
+This is possible because BSV's `OP_PUSH_TX` technique allows a contract to inspect the serialized preimage of the transaction that is trying to spend it. By examining this preimage, the contract can verify properties of the spending transaction.
+
+## Introspection with OP_PUSH_TX
+
+`OP_PUSH_TX` is not a single opcode but a technique that uses `checkPreimage` to verify that a serialized transaction preimage provided in the unlocking script is authentic. Once verified, the contract can parse individual fields from the preimage.
+
+In Runar, you access preimage fields through the `SigHashPreimage` parameter:
+
+```typescript
+import {
+  SmartContract, assert, SigHashPreimage,
+  checkPreimage, extractOutputHash,
+  Sha256, hash256,
+} from 'runar-lang';
+
+class CovenantExample extends SmartContract {
+  public spend(preimage: SigHashPreimage) {
+    // Verify the preimage is authentic
+    assert(checkPreimage(preimage));
+
+    // Now we can trust preimage fields and enforce constraints
+    const outputHash = extractOutputHash(preimage);
+    // ... enforce output constraints
+  }
+}
+```
+
+The `checkPreimage` function verifies the preimage against the transaction's sighash. Once this passes, every field extracted from the preimage is guaranteed to be part of the actual spending transaction.
+
+### Available Preimage Fields
+
+| Field | Description |
+|-------|-------------|
+| `version` | Transaction version number |
+| `hashPrevouts` | Hash of all input outpoints |
+| `hashSequence` | Hash of all input sequence numbers |
+| `outpoint` | The outpoint being spent (txid + index) |
+| `scriptCode` | The locking script being evaluated |
+| `amount` | Value of the UTXO being spent (in satoshis) |
+| `sequence` | Sequence number of the spending input |
+| `hashOutputs` | Hash of all outputs in the spending transaction |
+| `locktime` | Transaction locktime |
+| `sigHashType` | Sighash flags |
+
+## Single-Output Covenants
+
+The simplest covenant pattern constrains the spending transaction to produce a single output with specific properties. Here is a `CovenantVault` that enforces spending to a designated recipient:
+
+```typescript
+import {
+  SmartContract, assert, SigHashPreimage, Sig, PubKey, Addr,
+  checkPreimage, checkSig, extractOutputHash,
+  hash256, buildOutput, buildP2PKHScript,
+} from 'runar-lang';
+
+class CovenantVault extends SmartContract {
+  readonly ownerPubKey: PubKey;
+  readonly recipientAddr: Addr;
+  readonly minAmount: bigint;
+
+  constructor(ownerPubKey: PubKey, recipientAddr: Addr, minAmount: bigint) {
+    super(ownerPubKey, recipientAddr, minAmount);
+    this.ownerPubKey = ownerPubKey;
+    this.recipientAddr = recipientAddr;
+    this.minAmount = minAmount;
+  }
+
+  public withdraw(sig: Sig, preimage: SigHashPreimage) {
+    // Verify the transaction preimage is authentic
+    assert(checkPreimage(preimage));
+
+    // Verify the owner authorized this spend
+    assert(checkSig(sig, this.ownerPubKey));
+
+    // Build the expected output: P2PKH to the designated recipient
+    const expectedScript = buildP2PKHScript(this.recipientAddr);
+    const expectedOutput = buildOutput(expectedScript, this.minAmount);
+
+    // Verify the spending transaction creates this exact output
+    const actualOutputHash = extractOutputHash(preimage);
+    assert(hash256(expectedOutput) === actualOutputHash);
+  }
+}
+```
+
+This contract locks funds and ensures that when the owner withdraws, the funds go to the pre-designated `recipientAddr` with at least `minAmount` satoshis. Even if the owner's private key is compromised, the attacker cannot redirect funds to a different address.
+
+## Multi-Output Covenants
+
+More complex covenants constrain multiple outputs. For example, a contract that splits funds between two parties:
+
+```typescript
+class SplitPayment extends SmartContract {
+  readonly partyA: Addr;
+  readonly partyB: Addr;
+  readonly splitRatio: bigint; // percentage to party A (0-100)
+
+  public split(preimage: SigHashPreimage, totalAmount: bigint) {
+    assert(checkPreimage(preimage));
+
+    const amountA = totalAmount * this.splitRatio / 100n;
+    const amountB = totalAmount - amountA;
+
+    const outputA = buildOutput(buildP2PKHScript(this.partyA), amountA);
+    const outputB = buildOutput(buildP2PKHScript(this.partyB), amountB);
+
+    // Concatenate both outputs and verify against the transaction
+    const expectedOutputs = outputA + outputB;
+    const actualOutputHash = extractOutputHash(preimage);
+    assert(hash256(expectedOutputs) === actualOutputHash);
+  }
+}
+```
+
+The `hashOutputs` field in the preimage is a hash of *all* outputs concatenated. By building the expected outputs, concatenating them, and comparing the hash, the contract verifies the entire output set of the spending transaction.
+
+## Composing Covenants for Complex Logic
+
+Covenants compose naturally. A contract can enforce constraints on different aspects of the transaction by examining different preimage fields:
+
+```typescript
+class TimelockVault extends SmartContract {
+  readonly ownerPubKey: PubKey;
+  readonly recipientAddr: Addr;
+  readonly unlockHeight: bigint;
+
+  public withdraw(sig: Sig, preimage: SigHashPreimage) {
+    assert(checkPreimage(preimage));
+    assert(checkSig(sig, this.ownerPubKey));
+
+    // Timelock constraint: cannot spend before block height
+    const locktime = extractLocktime(preimage);
+    assert(locktime >= this.unlockHeight);
+
+    // Output constraint: must send to designated recipient
+    const expectedScript = buildP2PKHScript(this.recipientAddr);
+    const expectedOutput = buildOutput(expectedScript, extractAmount(preimage));
+    assert(hash256(expectedOutput) === extractOutputHash(preimage));
+  }
+}
+```
+
+This combines three constraints: authorization (signature), timing (locktime), and destination (output script).
+
+### Pattern: Covenant Chaining
+
+A covenant can require that its output is another covenant, creating a chain of constrained transactions. This is the foundation of stateful contracts and token protocols:
+
+```
+Tx1: [CovenantA] --spend--> Tx2: [CovenantB] --spend--> Tx3: [CovenantC]
+```
+
+Each covenant in the chain enforces that the next transaction maintains specific invariants. The `StatefulSmartContract` pattern in Runar automates this chaining -- see [Recursive Contracts](/docs/en/advanced/recursive-contracts-and-zk-proofs) for details.
+
+## Performance and Script Size Considerations
+
+Covenants that verify the full transaction preimage add significant script size overhead. The `checkPreimage` operation alone requires approximately 300-500 bytes of script. Each additional field extraction and verification adds more.
+
+### Optimization Strategies
+
+**Minimize preimage fields checked.** Only verify the fields you actually need to constrain. If you only care about outputs, do not check locktime or sequence.
+
+**Use partial sighash types.** With `SigHash.SINGLE`, the `hashOutputs` only covers the output at the same index as the input. This reduces the data your contract needs to construct and verify.
+
+**Precompute where possible.** If a covenant always enforces the same output script, embed the hash of the expected script as a constant rather than rebuilding it at execution time.
+
+**Watch stack depth.** Preimage parsing pushes many values onto the stack. Complex covenants can approach the 800-element stack limit. Use the script debugger's `stack` command to monitor depth during development.
+
+### Script Size Guidelines
+
+| Pattern | Typical Script Size |
+|---------|-------------------|
+| Simple P2PKH (no covenant) | ~25 bytes |
+| Single-output covenant | ~500-800 bytes |
+| Multi-output covenant | ~800-1,500 bytes |
+| Stateful recursive covenant | ~1,500-3,000 bytes |
+| Token contract with merge | ~3,000-5,000 bytes |
+
+Script size affects transaction fees proportionally. Plan for this in your fee estimation when deploying covenant contracts.

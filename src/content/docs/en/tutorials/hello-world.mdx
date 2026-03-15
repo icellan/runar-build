@@ -1,0 +1,352 @@
+---
+title: "Hello World Contract"
+description: "Your first smart contract."
+section: "tutorials"
+order: 10
+lang: "en"
+---
+
+This tutorial walks you through creating, compiling, testing, and deploying a minimal "Hello World" contract on BSV using Runar. You will build a Pay-to-Public-Key-Hash (P2PKH) contract -- the most fundamental Bitcoin spending condition -- and take it from source code to a live transaction on the BSV testnet.
+
+By the end of this tutorial, you will understand:
+
+- The structure of a `SmartContract` in Runar
+- How constructor arguments become embedded locking script parameters
+- How public methods define spending conditions
+- The full workflow: write, compile, test, deploy, verify
+
+## Prerequisites
+
+Before starting, make sure you have:
+
+- Runar CLI installed (see [Installation](/docs/en/getting-started/installation))
+- Node.js >= 20 and pnpm 9.15+
+- A BSV testnet wallet with some test coins (needed for the deployment step at the end)
+
+## Setting Up the Project
+
+Scaffold a new Runar project using the CLI:
+
+```bash
+runar init hello-world
+cd hello-world
+pnpm install
+```
+
+This creates the standard Runar project layout:
+
+```
+hello-world/
+  contracts/       # Your .runar.ts contract source files
+  tests/           # Test files (*.test.ts)
+  artifacts/       # Compiled JSON artifacts (generated)
+  package.json
+  tsconfig.json
+  runar.config.ts
+```
+
+The `contracts/` directory is where your contract source lives. The `tests/` directory is pre-configured with vitest. The `artifacts/` directory will be populated when you compile.
+
+## Writing the Hello World Contract
+
+Create a new file at `contracts/P2PKH.runar.ts`. This implements Pay-to-Public-Key-Hash, the standard Bitcoin pattern where funds can only be spent by proving ownership of the private key that corresponds to a given public key hash.
+
+```typescript
+import {
+  SmartContract,
+  assert,
+  PubKey,
+  Sig,
+  Ripemd160,
+  hash160,
+  checkSig,
+} from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Ripemd160;
+
+  constructor(pubKeyHash: Ripemd160) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+
+export { P2PKH };
+```
+
+Let's break down every part of this contract:
+
+### The Import Statement
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, Ripemd160, hash160, checkSig } from 'runar-lang';
+```
+
+All Runar contracts import from `runar-lang`. This is the only allowed import in contract files. The import provides the base class (`SmartContract`), assertion function (`assert`), cryptographic types (`PubKey`, `Sig`, `Ripemd160`), and built-in functions (`hash160`, `checkSig`).
+
+### The Class Declaration
+
+```typescript
+class P2PKH extends SmartContract {
+```
+
+The contract extends `SmartContract`, which means it is **stateless**. All properties are `readonly` and baked into the locking script at deployment. Once the UTXO is spent, the contract instance is consumed.
+
+### The Property
+
+```typescript
+readonly pubKeyHash: Ripemd160;
+```
+
+`Ripemd160` is a 20-byte type representing a RIPEMD-160 hash digest. The `readonly` keyword is required for `SmartContract` properties -- stateless contracts cannot have mutable state. This value is embedded directly in the compiled Bitcoin Script.
+
+### The Constructor
+
+```typescript
+constructor(pubKeyHash: Ripemd160) {
+  super(pubKeyHash);
+  this.pubKeyHash = pubKeyHash;
+}
+```
+
+The constructor takes the public key hash as a deployment-time parameter. The `super()` call registers it as a constructor argument so the compiler knows to embed it in the script. Every Runar constructor must call `super()` -- omitting it is a compile-time error.
+
+### The Public Method
+
+```typescript
+public unlock(sig: Sig, pubKey: PubKey) {
+  assert(hash160(pubKey) === this.pubKeyHash);
+  assert(checkSig(sig, pubKey));
+}
+```
+
+Public methods define spending conditions. When someone wants to spend this UTXO, they must provide arguments that satisfy all assertions in a public method:
+
+1. `hash160(pubKey) === this.pubKeyHash` -- The provided public key must hash to the stored hash. This binds the contract to a specific key pair without revealing the full public key until spending time.
+2. `checkSig(sig, pubKey)` -- The signature must be valid for the provided public key. This proves the spender controls the corresponding private key.
+
+If both assertions pass, the UTXO is spent. If either fails, the transaction is rejected by the network.
+
+## Compiling the Contract
+
+Compile the contract source into a deployable artifact:
+
+```bash
+runar compile contracts/P2PKH.runar.ts --output ./artifacts --asm
+```
+
+This produces `artifacts/P2PKH.json`. The `--asm` flag includes human-readable assembly in the output, which is useful for learning and debugging.
+
+### Understanding the Artifact
+
+The compiled artifact is a JSON file containing everything needed to deploy and interact with the contract:
+
+```json
+{
+  "version": 1,
+  "compilerVersion": "0.1.0",
+  "contractName": "P2PKH",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "pubKeyHash", "type": "Ripemd160" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "unlock",
+        "params": [
+          { "name": "sig", "type": "Sig" },
+          { "name": "pubKey", "type": "PubKey" }
+        ]
+      }
+    ]
+  },
+  "script": "76a914<pubKeyHash>88ac",
+  "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG"
+}
+```
+
+Key fields:
+
+- **`abi`** -- The contract's interface. The SDK and codegen tools use this to construct transactions.
+- **`script`** -- Hex-encoded Bitcoin Script with `<pubKeyHash>` as a placeholder, filled in at deployment.
+- **`asm`** -- Human-readable assembly. This P2PKH compiles to the classic Bitcoin opcodes: `OP_DUP OP_HASH160 <hash> OP_EQUALVERIFY OP_CHECKSIG`.
+
+Notice that the Runar contract compiles to the exact same Bitcoin Script as a standard P2PKH output. The Runar language is a zero-overhead abstraction over Bitcoin Script.
+
+## Writing and Running a Test
+
+Create a test file at `tests/P2PKH.test.ts`:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('P2PKH', () => {
+  it('should unlock with correct key pair', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/P2PKH.runar.ts',
+      'P2PKH'
+    );
+
+    // Generate a test key pair
+    const privateKey = bsv.PrivateKey.fromRandom('testnet');
+    const publicKey = privateKey.toPublicKey();
+    const pubKeyHash = bsv.crypto.Hash.sha256ripemd160(
+      publicKey.toBuffer()
+    ).toString('hex');
+
+    // Create a contract instance with the public key hash
+    const instance = contract.create(pubKeyHash);
+
+    // Unlock should succeed with matching key pair
+    const result = await instance.call('unlock', {
+      sig: instance.sign(privateKey),
+      pubKey: publicKey.toString(),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should fail with wrong key pair', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/P2PKH.runar.ts',
+      'P2PKH'
+    );
+
+    const correctKey = bsv.PrivateKey.fromRandom('testnet');
+    const wrongKey = bsv.PrivateKey.fromRandom('testnet');
+    const pubKeyHash = bsv.crypto.Hash.sha256ripemd160(
+      correctKey.toPublicKey().toBuffer()
+    ).toString('hex');
+
+    const instance = contract.create(pubKeyHash);
+
+    // Unlock should fail when signed with wrong key
+    const result = await instance.call('unlock', {
+      sig: instance.sign(wrongKey),
+      pubKey: wrongKey.toPublicKey().toString(),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should fail when pubKey does not match hash', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/P2PKH.runar.ts',
+      'P2PKH'
+    );
+
+    const keyA = bsv.PrivateKey.fromRandom('testnet');
+    const keyB = bsv.PrivateKey.fromRandom('testnet');
+
+    // Lock to keyA's hash
+    const pubKeyHash = bsv.crypto.Hash.sha256ripemd160(
+      keyA.toPublicKey().toBuffer()
+    ).toString('hex');
+
+    const instance = contract.create(pubKeyHash);
+
+    // Sign correctly with keyB, but provide keyB's pubKey (wrong hash)
+    const result = await instance.call('unlock', {
+      sig: instance.sign(keyB),
+      pubKey: keyB.toPublicKey().toString(),
+    });
+
+    // Signature is valid for keyB, but hash160(keyB) !== pubKeyHash
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+Run the tests:
+
+```bash
+runar test
+```
+
+Expected output:
+
+```
+ ✓ tests/P2PKH.test.ts (3 tests) 62ms
+   ✓ P2PKH > should unlock with correct key pair
+   ✓ P2PKH > should fail with wrong key pair
+   ✓ P2PKH > should fail when pubKey does not match hash
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Duration  345ms
+```
+
+Tests run entirely locally. No BSV node or network connection is required. The `TestContract` utility compiles the contract on the fly and executes the Bitcoin Script in a local interpreter.
+
+## Deploying to Testnet
+
+Once your tests pass, deploy the contract to the BSV testnet. You need a WIF-format private key with testnet coins.
+
+```bash
+runar deploy ./artifacts/P2PKH.json \
+  --network testnet \
+  --key <your-WIF-private-key> \
+  --satoshis 10000
+```
+
+The `--satoshis` flag specifies how many satoshis to lock in the contract output. On success:
+
+```
+Contract deployed successfully.
+  Network:  testnet
+  TxID:     a1b2c3d4e5f6...
+  Output:   0
+  Satoshis: 10000
+  Script:   76a914...88ac
+```
+
+The deploy command constructs a transaction with one output whose locking script is the compiled P2PKH script (with your public key hash substituted in). It broadcasts the transaction to the BSV testnet.
+
+### Verifying the Deployment
+
+Confirm the on-chain script matches your compiled artifact:
+
+```bash
+runar verify a1b2c3d4e5f6... \
+  --artifact ./artifacts/P2PKH.json \
+  --network testnet
+```
+
+This fetches the transaction from the network and compares the on-chain locking script against the artifact:
+
+```
+Verification passed.
+  Contract:  P2PKH
+  TxID:      a1b2c3d4e5f6...
+  Script match: ✓
+```
+
+## Key Concepts Recap
+
+| Concept | What You Learned |
+| --- | --- |
+| `SmartContract` | Stateless contracts with `readonly` properties embedded in the locking script |
+| `constructor` + `super()` | How deployment-time parameters are registered with the compiler |
+| Public methods | Spending conditions that callers must satisfy with valid arguments |
+| `assert()` | The assertion primitive -- every public method must contain at least one |
+| `hash160` / `checkSig` | Built-in cryptographic functions that map to Bitcoin Script opcodes |
+| `TestContract` | Local contract testing without network dependencies |
+| `runar compile` | Source-to-artifact compilation with optional ASM output |
+| `runar deploy` | Broadcasting a contract to the BSV network |
+
+## What's Next
+
+You have completed the full Runar workflow: write, compile, test, deploy, and verify. Continue with:
+
+- [Fungible Token Tutorial](/docs/en/tutorials/fungible-token) -- Build a stateful token contract with transfer, send, and merge operations
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Deep dive into the type system, built-in functions, and compiler constraints
+- [Project Structure](/docs/en/getting-started/project-structure) -- Understand the full project layout and artifact format

@@ -1,0 +1,266 @@
+---
+title: "Security Considerations"
+description: "Security best practices for BSV contracts."
+section: "advanced"
+order: 40
+lang: "en"
+---
+
+Smart contracts on BSV handle real value, so security is paramount. This page covers the language-level safety guarantees Runar provides, common attack vectors in UTXO contracts, defensive patterns, and best practices for writing secure contracts.
+
+## Language-Level Safety Guarantees
+
+Runar's compiler enforces several properties that eliminate entire classes of vulnerabilities at compile time.
+
+### Affine Types
+
+`Sig` and `SigHashPreimage` are affine types -- they can be consumed exactly once. The compiler tracks usage and rejects any program that uses an affine value more than once:
+
+```typescript
+public unlock(sig: Sig, pubKeyA: PubKey, pubKeyB: PubKey) {
+  assert(checkSig(sig, pubKeyA));
+  assert(checkSig(sig, pubKeyB)); // Compile error: sig already consumed
+}
+```
+
+This prevents signature replay attacks where the same signature is checked against multiple conditions. If you need to verify a signature against multiple keys, restructure the logic:
+
+```typescript
+public unlock(sigA: Sig, sigB: Sig, pubKeyA: PubKey, pubKeyB: PubKey) {
+  assert(checkSig(sigA, pubKeyA));
+  assert(checkSig(sigB, pubKeyB));
+}
+```
+
+### Eager Evaluation (No Short-Circuit)
+
+Unlike most programming languages, Runar evaluates **both sides** of `&&` and `||` expressions. There is no short-circuit evaluation:
+
+```typescript
+// Both sides ALWAYS execute, even if the left side determines the result
+assert(checkSig(sig, pubKey) && verifyRabinSig(msg, rabinSig, oracleKey));
+```
+
+This is a deliberate design decision that matches Bitcoin Script semantics. In Bitcoin Script, there is no conditional skipping of operations -- every opcode executes sequentially. The Runar compiler makes this explicit to prevent developers from assuming short-circuit behavior.
+
+**Security implication:** You cannot rely on the left side of `&&` to guard against errors in the right side. Both expressions always execute. If the right side can fail independently, handle it separately:
+
+```typescript
+const sigValid = checkSig(sig, pubKey);
+const oracleValid = verifyRabinSig(msg, rabinSig, oracleKey);
+assert(sigValid && oracleValid);
+```
+
+### Guaranteed Termination
+
+Runar does not support unbounded loops, recursion, or any form of unbounded computation. Every Runar program is guaranteed to terminate. The compiler rejects:
+
+- `for`, `while`, `do-while` loops
+- Recursive function calls
+- `goto` or equivalent control flow
+
+This eliminates denial-of-service attacks based on non-terminating scripts. It also means that script execution time and cost are bounded and predictable.
+
+### Maximum Stack Depth
+
+Bitcoin Script (and therefore Runar) enforces a maximum stack depth of **800 elements**. The compiler performs static analysis to estimate maximum stack usage and warns when a contract approaches this limit. At runtime, exceeding 800 elements causes immediate script failure.
+
+## Common Attack Vectors in UTXO Contracts
+
+### Signature Replay
+
+**Attack:** An attacker reuses a valid signature from a previous transaction to authorize a new, unauthorized transaction.
+
+**Defense in Runar:** Affine types prevent signature reuse within a single script execution. Across transactions, the sighash mechanism ensures that signatures are bound to specific transaction data. Always use `checkSig` with the appropriate `SigHashType` to bind signatures to the transaction.
+
+### Transaction Malleability
+
+**Attack:** An attacker modifies a transaction (e.g., changing the signature encoding) without invalidating it, causing the TxID to change. This breaks any contract that references the original TxID.
+
+**Defense:** BSV has eliminated most sources of malleability. When writing covenants, use `hashPrevouts` and `hashOutputs` from the preimage rather than raw TxIDs when possible, as these are computed from the transaction content and are not affected by encoding variations.
+
+### Covenant Bypass
+
+**Attack:** A spending transaction satisfies the covenant's signature check but violates the output constraints by exploiting gaps in the covenant's verification.
+
+**Defense:** Verify all relevant preimage fields, not just outputs. Ensure `checkPreimage` passes before trusting any extracted field. When building expected outputs, construct the complete output (script + amount) and verify the full hash.
+
+### Oracle Manipulation
+
+**Attack:** An oracle provides fraudulent data to trigger a contract in the attacker's favor. For example, a price oracle contract could be exploited if the oracle reports a false price.
+
+**Defense:** Use Rabin signatures for oracle data verification. Implement domain separation to prevent oracle messages from one contract being replayed in another:
+
+```typescript
+// Bad: oracle signs just the price
+const message = packUint(price);
+
+// Good: oracle signs price + contract-specific context
+const message = sha256(packUint(price) + contractId + timestamp);
+```
+
+Per-instance isolation through domain separation ensures that an oracle message intended for one contract cannot be used to exploit a different contract, even if both use the same oracle.
+
+### Dust Attacks
+
+**Attack:** An attacker sends many tiny UTXO outputs to a contract or wallet, increasing the cost of spending them and potentially exhausting fees.
+
+**Defense:** Enforce minimum output amounts in your covenant constraints. The standard BSV dust threshold is 546 satoshis. The Runar SDK's `selectUtxos` utility automatically filters out uneconomical UTXOs.
+
+## Signature and Authorization Patterns
+
+### Single-Signature Authorization
+
+The simplest pattern -- a single key authorizes spending:
+
+```typescript
+public unlock(sig: Sig, pubKey: PubKey) {
+  assert(hash160(pubKey) === this.pubKeyHash);
+  assert(checkSig(sig, pubKey));
+}
+```
+
+### Multi-Signature Thresholds
+
+Require M-of-N signatures:
+
+```typescript
+public unlock(sigs: FixedArray<Sig, 3>, pubKeys: FixedArray<PubKey, 3>) {
+  assert(checkMultiSig(sigs, pubKeys));
+}
+```
+
+### Time-Locked Authorization
+
+Combine signature checks with temporal constraints:
+
+```typescript
+public withdraw(sig: Sig, preimage: SigHashPreimage) {
+  assert(checkPreimage(preimage));
+  assert(extractLocktime(preimage) >= this.unlockTime);
+  assert(checkSig(sig, this.ownerPubKey));
+}
+```
+
+### Hierarchical Authorization
+
+Different levels of authority for different operations:
+
+```typescript
+// Emergency withdrawal requires admin key
+public emergencyWithdraw(sig: Sig) {
+  assert(checkSig(sig, this.adminPubKey));
+}
+
+// Normal withdrawal requires user key + timelock
+public withdraw(sig: Sig, preimage: SigHashPreimage) {
+  assert(checkPreimage(preimage));
+  assert(extractLocktime(preimage) >= this.cooldownEnd);
+  assert(checkSig(sig, this.userPubKey));
+}
+```
+
+## Post-Quantum Cryptography
+
+BSV's standard ECDSA and Schnorr signatures are vulnerable to quantum computers. Runar supports post-quantum signature schemes for forward-looking security.
+
+### WOTS+ (Winternitz One-Time Signature)
+
+WOTS+ is a hash-based signature scheme that is quantum-resistant. It produces larger signatures (approximately 2,144 bytes) and each key pair can only be used **once**.
+
+**Use case:** High-value UTXOs that will only be spent once, such as cold storage or escrow contracts.
+
+**Limitation:** One-time use is enforced by the mathematics, not the protocol. Reusing a WOTS+ key pair to sign two different messages leaks the private key. Your application must ensure each key pair is used at most once.
+
+### SLH-DSA (FIPS 205)
+
+SLH-DSA (Stateless Hash-Based Digital Signature Algorithm), standardized as FIPS 205, is a stateless hash-based signature scheme. Unlike WOTS+, it supports **multi-use** key pairs.
+
+**Use case:** Recurring signatures, such as oracle attestations or multi-transaction contract interactions.
+
+**Trade-off:** Larger signatures and slower verification compared to ECDSA, but no single-use restriction.
+
+### Hybrid Approach
+
+The recommended approach for production contracts is a hybrid scheme that requires both a classical ECDSA signature and a post-quantum signature:
+
+```typescript
+public unlock(
+  ecdsaSig: Sig,
+  pqSig: ByteString,
+  pubKey: PubKey,
+  pqPubKey: ByteString,
+) {
+  // Classical verification (fast, small)
+  assert(checkSig(ecdsaSig, pubKey));
+
+  // Post-quantum verification (slow, large, but quantum-safe)
+  assert(verifyWOTS(pqSig, pqPubKey, sha256(ecdsaSig)));
+}
+```
+
+This provides security against both classical and quantum attackers. An attacker would need to break *both* schemes.
+
+## Oracle Trust and Domain Separation
+
+### Rabin Signatures for Oracle Data
+
+Runar uses Rabin signatures for oracle data verification. Rabin signatures are simple, efficient, and well-suited to Bitcoin Script verification:
+
+```typescript
+public settle(
+  price: bigint,
+  rabinSig: RabinSig,
+  padding: ByteString,
+) {
+  const message = packOracleMessage(price);
+  assert(verifyRabinSig(message, rabinSig, this.oraclePubKey, padding));
+
+  if (price > this.strikePrice) {
+    // settle to Alice
+  } else {
+    // settle to Bob
+  }
+}
+```
+
+### Domain Separation
+
+Without domain separation, an oracle message signed for one purpose could be replayed in a different context. Always include contract-specific context in the signed message:
+
+```typescript
+// Include contract identifier and timestamp in the oracle message
+const message = sha256(
+  packUint(price) +
+  this.contractId +       // unique per contract instance
+  packUint(timestamp) +   // prevents replay of old messages
+  packUint(this.nonce)    // additional replay protection
+);
+```
+
+## Auditing and Verification Checklist
+
+Before deploying a contract to mainnet, verify:
+
+| Check | Tool |
+|-------|------|
+| All `assert()` paths tested with valid and invalid inputs | `runar test` |
+| Affine types not accidentally consumed in dead code | Compiler (automatic) |
+| Stack depth within 800-element limit | `runar compile --verbose` |
+| Covenant outputs fully verified (script + amount) | Manual review + tests |
+| Oracle messages use domain separation | Manual review |
+| No unprotected public methods | Manual review |
+| Fee estimation accounts for worst-case script size | `estimateDeployFee()` |
+| Compiled artifact matches source via `runar verify` | `runar verify` |
+| Cross-compiler conformance passes (if multi-language) | `runar test --conformance` |
+| Differential fuzzing shows no discrepancies | `differentialFuzz()` |
+
+## Operational Security for Deployment Keys
+
+**Key management.** Never store deployment private keys in source code, environment variables on shared machines, or unencrypted configuration files. Use a hardware security module (HSM) or a secure key management service.
+
+**Separate keys.** Use different keys for testnet and mainnet. Use different keys for deployment and contract interaction.
+
+**Key rotation.** For long-lived contracts (especially recursive covenants), design the contract to support key rotation -- the ability to update the authorized public key through a state transition.
+
+**Multisig deployment.** For high-value contracts, use a multi-signature wallet for deployment so that no single compromised key can deploy malicious code.

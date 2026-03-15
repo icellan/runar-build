@@ -1,0 +1,340 @@
+---
+title: "Tic-Tac-Toe"
+description: "A two-player Tic-Tac-Toe game running entirely on-chain with state management, turn enforcement, and win detection."
+section: "examples"
+order: 30
+lang: "en"
+---
+
+This example implements a complete two-player Tic-Tac-Toe game as a stateful smart contract on BSV. Two players (Alice and Bob) take turns placing marks on a 3x3 board, with the contract enforcing turn order, move validity, win detection, and pot distribution. The entire game runs on-chain -- every move is a transaction.
+
+This is one of the more complex Runar examples. It demonstrates advanced state management with nine independent board cells, turn-based multiplayer logic, multiple exit conditions (win, tie, cancel), and the interplay between game rules and covenant enforcement.
+
+## Contract Source
+
+```typescript
+import {
+  StatefulSmartContract,
+  assert,
+  PubKey,
+  Sig,
+  Ripemd160,
+  checkSig,
+  SigHashPreimage,
+  checkPreimage,
+  extractOutputHash,
+  hash256,
+  hash160,
+  num2bin,
+} from 'runar-lang';
+
+class TicTacToe extends StatefulSmartContract {
+  readonly alice: PubKey;
+  readonly bob: PubKey;
+  c0: bigint; c1: bigint; c2: bigint; c3: bigint; c4: bigint;
+  c5: bigint; c6: bigint; c7: bigint; c8: bigint;
+  isAliceTurn: boolean;
+
+  constructor(alice: PubKey, bob: PubKey) {
+    super(alice, bob);
+    this.alice = alice;
+    this.bob = bob;
+    this.c0 = 0n; this.c1 = 0n; this.c2 = 0n;
+    this.c3 = 0n; this.c4 = 0n; this.c5 = 0n;
+    this.c6 = 0n; this.c7 = 0n; this.c8 = 0n;
+    this.isAliceTurn = true;
+  }
+
+  public move(sig: Sig, pos: bigint, txPreimage: SigHashPreimage) {
+    assert(checkPreimage(txPreimage));
+
+    const player = this.isAliceTurn ? 1n : 2n;
+
+    if (this.isAliceTurn) {
+      assert(checkSig(sig, this.alice));
+    } else {
+      assert(checkSig(sig, this.bob));
+    }
+
+    // Set cell at position, check valid move, toggle turn
+    // ... state continuation via addOutput + extractOutputHash
+  }
+
+  public moveAndWin(sig: Sig, pos: bigint, txPreimage: SigHashPreimage) {
+    // Similar to move but verifies win condition and pays winner
+  }
+
+  public moveAndTie(sig: Sig, pos: bigint, txPreimage: SigHashPreimage) {
+    // Verifies all cells filled, splits pot
+  }
+
+  public cancel(aliceSig: Sig, bobSig: Sig) {
+    assert(checkSig(aliceSig, this.alice));
+    assert(checkSig(bobSig, this.bob));
+  }
+}
+
+export { TicTacToe };
+```
+
+## Annotations
+
+### Player Identity and Board State
+
+```typescript
+readonly alice: PubKey;
+readonly bob: PubKey;
+```
+
+The two players are identified by their public keys, set when the game is created. These are `readonly` -- the players cannot change during the game.
+
+```typescript
+c0: bigint; c1: bigint; c2: bigint; c3: bigint; c4: bigint;
+c5: bigint; c6: bigint; c7: bigint; c8: bigint;
+```
+
+The board is represented as nine individual `bigint` cells, laid out as:
+
+```
+c0 | c1 | c2
+-----------
+c3 | c4 | c5
+-----------
+c6 | c7 | c8
+```
+
+Each cell has one of three values:
+- `0n` -- Empty (unclaimed)
+- `1n` -- Alice's mark (X)
+- `2n` -- Bob's mark (O)
+
+Why nine separate properties instead of a `FixedArray<bigint, 9>`? Individual properties give the compiler more flexibility in how the state is serialized and accessed in the Bitcoin Script. Each cell can be read and written independently without array indexing overhead.
+
+### Turn Tracking
+
+```typescript
+isAliceTurn: boolean;
+```
+
+A mutable boolean that tracks whose turn it is. Alice always goes first (`true` at initialization). After each move, this flag is toggled.
+
+### Constructor
+
+```typescript
+constructor(alice: PubKey, bob: PubKey) {
+  super(alice, bob);
+  this.alice = alice;
+  this.bob = bob;
+  this.c0 = 0n; this.c1 = 0n; this.c2 = 0n;
+  this.c3 = 0n; this.c4 = 0n; this.c5 = 0n;
+  this.c6 = 0n; this.c7 = 0n; this.c8 = 0n;
+  this.isAliceTurn = true;
+}
+```
+
+The game starts with an empty board (all cells `0n`) and Alice's turn. Both players' public keys are passed to `super()` to register them as part of the contract's initial state.
+
+### The `move` Method
+
+```typescript
+public move(sig: Sig, pos: bigint, txPreimage: SigHashPreimage) {
+  assert(checkPreimage(txPreimage));
+  const player = this.isAliceTurn ? 1n : 2n;
+  if (this.isAliceTurn) { assert(checkSig(sig, this.alice)); }
+  else { assert(checkSig(sig, this.bob)); }
+  // ...
+}
+```
+
+This is the primary game action. Let's trace the logic:
+
+1. **Preimage verification** -- `checkPreimage(txPreimage)` is called first, enabling covenant enforcement for the state continuation.
+
+2. **Determine player marker** -- `this.isAliceTurn ? 1n : 2n` maps the current turn to the appropriate cell value. Alice is `1n`, Bob is `2n`.
+
+3. **Signature check** -- The conditional `checkSig` ensures only the player whose turn it is can make a move. If it is Alice's turn, Alice's signature is required; otherwise, Bob's.
+
+4. **Cell placement** (abbreviated in the source) -- The contract verifies the chosen cell (`pos`) is currently empty (`0n`), then sets it to the player's marker. The `pos` parameter is a value from `0n` to `8n` mapping to cells `c0` through `c8`.
+
+5. **Turn toggle** -- After placing the mark, `isAliceTurn` is flipped to the other player.
+
+6. **State continuation** -- The updated board state is serialized into a new output via `addOutput`, and the `extractOutputHash` assertion enforces that the spending transaction creates exactly this output.
+
+The `move` method is used for moves that do not end the game. The game continues after this move, so a new UTXO with the updated board is created.
+
+### The `moveAndWin` Method
+
+```typescript
+public moveAndWin(sig: Sig, pos: bigint, txPreimage: SigHashPreimage) {
+  // Similar to move but verifies win condition and pays winner
+}
+```
+
+This method handles the winning move. The logic is similar to `move`, but after placing the mark:
+
+1. The contract checks all eight possible winning lines (3 rows, 3 columns, 2 diagonals).
+2. If the current player has three in a row, the win is confirmed.
+3. Instead of creating a continuation UTXO, the contract pays the entire pot to the winner.
+
+The win detection checks these eight lines:
+
+```
+Row wins:    (c0,c1,c2)  (c3,c4,c5)  (c6,c7,c8)
+Column wins: (c0,c3,c6)  (c1,c4,c7)  (c2,c5,c8)
+Diagonal wins: (c0,c4,c8)  (c2,c4,c6)
+```
+
+For each line, the contract verifies that all three cells contain the current player's marker. If any line matches, the player wins and the UTXO is spent without state continuation -- the winner receives the funds.
+
+### The `moveAndTie` Method
+
+```typescript
+public moveAndTie(sig: Sig, pos: bigint, txPreimage: SigHashPreimage) {
+  // Verifies all cells filled, splits pot
+}
+```
+
+This handles the case where the board is full and no one has won. After placing the final mark:
+
+1. The contract verifies that all nine cells are non-zero (board is full).
+2. The contract verifies that no winning line exists.
+3. The pot is split equally between Alice and Bob.
+
+### The `cancel` Method
+
+```typescript
+public cancel(aliceSig: Sig, bobSig: Sig) {
+  assert(checkSig(aliceSig, this.alice));
+  assert(checkSig(bobSig, this.bob));
+}
+```
+
+Both players can mutually agree to cancel the game at any time. This requires both signatures. The UTXO is spent without constraints on the outputs -- the players can split the pot however they agree off-chain.
+
+This is a safety valve. If one player stops responding, the other cannot unilaterally claim the funds (to prevent abuse). In a production version, you might add a timeout mechanism using `extractLocktime`.
+
+## Game Flow
+
+A typical game plays out as follows:
+
+1. **Deployment** -- Alice and Bob agree to play. One of them deploys the contract with both public keys and locks the bet amount (e.g., 20,000 satoshis). The board is empty, and it is Alice's turn.
+
+2. **Move 1 (Alice)** -- Alice calls `move` with `pos = 4n` (center). The transaction spends the initial UTXO and creates a new one with `c4 = 1n` and `isAliceTurn = false`.
+
+3. **Move 2 (Bob)** -- Bob calls `move` with `pos = 0n` (top-left corner). New UTXO: `c0 = 2n`, `isAliceTurn = true`.
+
+4. **Moves 3-8** -- Players alternate, each move creating a new UTXO.
+
+5. **Move 9 (or earlier)** -- If a player completes a line, they call `moveAndWin`. The contract verifies the win and pays them the pot. If the board fills without a winner, the last player calls `moveAndTie` and the pot is split.
+
+Each move is a separate transaction on the BSV blockchain. The entire game history is visible on-chain as a chain of transactions.
+
+## Test Code
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('TicTacToe', () => {
+  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
+  const bobKey = bsv.PrivateKey.fromRandom('testnet');
+  const alicePub = aliceKey.toPublicKey().toString();
+  const bobPub = bobKey.toPublicKey().toString();
+
+  it('should allow Alice to make the first move', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/TicTacToe.runar.ts',
+      'TicTacToe'
+    );
+    const instance = contract.create(alicePub, bobPub);
+
+    const result = await instance.call('move', {
+      sig: instance.sign(aliceKey),
+      pos: 4n,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject Bob moving on Alice turn', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/TicTacToe.runar.ts',
+      'TicTacToe'
+    );
+    const instance = contract.create(alicePub, bobPub);
+
+    // Bob tries to move first
+    const result = await instance.call('move', {
+      sig: instance.sign(bobKey),
+      pos: 0n,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should allow both players to cancel', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/TicTacToe.runar.ts',
+      'TicTacToe'
+    );
+    const instance = contract.create(alicePub, bobPub);
+
+    const result = await instance.call('cancel', {
+      aliceSig: instance.sign(aliceKey),
+      bobSig: instance.sign(bobKey),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject cancel with only one signature', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/TicTacToe.runar.ts',
+      'TicTacToe'
+    );
+    const instance = contract.create(alicePub, bobPub);
+
+    const result = await instance.call('cancel', {
+      aliceSig: instance.sign(aliceKey),
+      bobSig: instance.sign(aliceKey),
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+## Running the Example
+
+```bash
+# Compile
+runar compile contracts/TicTacToe.runar.ts --output ./artifacts --asm
+
+# Test
+runar test
+
+# Deploy a new game
+runar deploy ./artifacts/TicTacToe.json \
+  --network testnet \
+  --key <deployer-WIF-key> \
+  --satoshis 20000
+```
+
+## Design Notes
+
+**Why nine separate properties?** Bitcoin Script does not have efficient array indexing. Using individual properties `c0` through `c8` compiles to more straightforward stack operations than a `FixedArray<bigint, 9>` would. The trade-off is verbosity in the source code, but the compiled script is more efficient.
+
+**Why three methods instead of one?** Having separate `move`, `moveAndWin`, and `moveAndTie` methods keeps each method's logic simpler. The `move` method only handles state continuation. The `moveAndWin` method only handles win detection and payout. The `moveAndTie` method only handles the draw scenario. This separation makes the contract easier to reason about and audit.
+
+**Why no timeout?** This example focuses on game logic. In a production version, you would add a timeout method that allows the waiting player to claim the pot if the other player does not move within a certain number of blocks. This would use `extractLocktime` from the preimage.
+
+## Key Takeaways
+
+- Complex game logic can run entirely on-chain as a stateful contract.
+- Nine independent mutable properties track the board state; a boolean tracks turns.
+- Multiple public methods handle different game outcomes (continue, win, tie, cancel).
+- Turn enforcement via conditional `checkSig` ensures only the correct player can move.
+- The contract's covenant guarantees valid state transitions -- players cannot cheat.

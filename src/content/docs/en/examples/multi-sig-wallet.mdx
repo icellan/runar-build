@@ -1,0 +1,321 @@
+---
+title: "Blackjack Betting"
+description: "Oracle-attested blackjack betting contract with Rabin signature verification for provably fair settlement."
+section: "examples"
+order: 50
+lang: "en"
+---
+
+The blackjack betting contract demonstrates an oracle-attested gambling pattern where a player bets against a house. The game is played off-chain (or through a separate game server), and the outcome is settled on-chain using a Rabin oracle signature. The oracle attests to the player's hand total, and the contract uses this attestation to determine the payout.
+
+This example introduces Rabin oracle signatures (`verifyRabinSig`), multi-path settlement (blackjack, regular win, loss, cancel), and the pattern of using off-chain computation with on-chain verification.
+
+## Contract Source
+
+```typescript
+import {
+  SmartContract,
+  assert,
+  PubKey,
+  Sig,
+  ByteString,
+  RabinSig,
+  RabinPubKey,
+  checkSig,
+  verifyRabinSig,
+  num2bin,
+} from 'runar-lang';
+
+class BlackjackBet extends SmartContract {
+  readonly player: PubKey;
+  readonly house: PubKey;
+  readonly oraclePubKey: RabinPubKey;
+  readonly betAmount: bigint;
+
+  constructor(
+    player: PubKey,
+    house: PubKey,
+    oraclePubKey: RabinPubKey,
+    betAmount: bigint
+  ) {
+    super(player, house, oraclePubKey, betAmount);
+    this.player = player;
+    this.house = house;
+    this.oraclePubKey = oraclePubKey;
+    this.betAmount = betAmount;
+  }
+
+  public settleBlackjack(
+    rabinSig: RabinSig,
+    padding: ByteString,
+    playerSig: Sig
+  ) {
+    // 3:2 payout for blackjack
+    const msg = num2bin(21n, 8n);
+    assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
+    assert(checkSig(playerSig, this.player));
+  }
+
+  public settleWin(
+    playerTotal: bigint,
+    rabinSig: RabinSig,
+    padding: ByteString,
+    playerSig: Sig
+  ) {
+    assert(playerTotal > 0n);
+    assert(playerTotal <= 21n);
+    const msg = num2bin(playerTotal, 8n);
+    assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
+    assert(checkSig(playerSig, this.player));
+  }
+
+  public settleLoss(houseSig: Sig) {
+    assert(checkSig(houseSig, this.house));
+  }
+
+  public cancel(playerSig: Sig, houseSig: Sig) {
+    assert(checkSig(playerSig, this.player));
+    assert(checkSig(houseSig, this.house));
+  }
+}
+
+export { BlackjackBet };
+```
+
+## Annotations
+
+### The Oracle Pattern
+
+The core idea behind this contract is the separation of computation and verification:
+
+- **Off-chain:** The blackjack game is played (dealing cards, player decisions, dealer play).
+- **On-chain:** The result is verified and funds are distributed.
+
+The bridge between these two worlds is the **Rabin oracle**. A trusted oracle observes the game, computes the player's hand total, and signs the result with their Rabin private key. The contract verifies this signature on-chain using the oracle's public key, which was embedded in the contract at deployment.
+
+### Rabin Signatures
+
+```typescript
+readonly oraclePubKey: RabinPubKey;
+```
+
+`RabinPubKey` is a `bigint` subtype representing a Rabin public key. Rabin signatures are preferred over ECDSA for oracle patterns in BSV because they are cheaper to verify in Bitcoin Script.
+
+The `verifyRabinSig` built-in function takes four arguments:
+
+```typescript
+verifyRabinSig(msg, rabinSig, padding, oraclePubKey)
+```
+
+- **`msg`** -- The message being attested to (in this case, the player's hand total encoded as bytes).
+- **`rabinSig`** -- The Rabin signature value (`RabinSig` type, also a `bigint`).
+- **`padding`** -- A `ByteString` padding value required by the Rabin verification algorithm.
+- **`oraclePubKey`** -- The oracle's public key, embedded in the contract at deployment.
+
+If the signature is valid for the given message and public key, the function returns `true`. Otherwise, it returns `false`.
+
+### Contract Properties
+
+```typescript
+readonly player: PubKey;
+readonly house: PubKey;
+readonly oraclePubKey: RabinPubKey;
+readonly betAmount: bigint;
+```
+
+All four properties are `readonly` -- this is a stateless contract (`SmartContract`). The bet terms are fixed at deployment:
+
+- **`player`** -- The bettor's public key.
+- **`house`** -- The house's public key (the party taking the other side of the bet).
+- **`oraclePubKey`** -- The oracle that will attest to the game result.
+- **`betAmount`** -- The wager amount. The UTXO is funded with the player's bet plus the house's matching funds.
+
+### The `settleBlackjack` Method
+
+```typescript
+public settleBlackjack(rabinSig: RabinSig, padding: ByteString, playerSig: Sig) {
+  const msg = num2bin(21n, 8n);
+  assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
+  assert(checkSig(playerSig, this.player));
+}
+```
+
+This method handles the best possible outcome for the player: a natural blackjack (hand total of exactly 21 with the first two cards). In standard blackjack rules, this pays 3:2.
+
+The logic:
+
+1. **Encode the expected message** -- `num2bin(21n, 8n)` converts the number 21 into an 8-byte `ByteString`. This is the message format the oracle uses when attesting to a hand total.
+
+2. **Verify oracle attestation** -- `verifyRabinSig` confirms the oracle signed the message "21" with their private key. This proves the oracle observed a blackjack.
+
+3. **Verify player identity** -- `checkSig(playerSig, this.player)` ensures the actual player is claiming the payout, not someone else who intercepted the oracle signature.
+
+The payout logic is handled in the transaction construction: the player receives `betAmount * 3n / 2n` (3:2 payout).
+
+### The `settleWin` Method
+
+```typescript
+public settleWin(playerTotal: bigint, rabinSig: RabinSig, padding: ByteString, playerSig: Sig) {
+  assert(playerTotal > 0n);
+  assert(playerTotal <= 21n);
+  const msg = num2bin(playerTotal, 8n);
+  assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
+  assert(checkSig(playerSig, this.player));
+}
+```
+
+This handles a regular win (not blackjack). The player's total is between 1 and 21, and it beat the dealer's total.
+
+The key difference from `settleBlackjack`:
+
+- The `playerTotal` is a parameter rather than hardcoded to 21.
+- The contract validates the total is in the valid range (`> 0n` and `<= 21n`).
+- The oracle signs the actual total, not just "21".
+- The payout is 1:1 (standard win) rather than 3:2.
+
+The contract does not know the dealer's total. The oracle's attestation of the player's winning total is sufficient -- the oracle only signs a winning total when the player actually won. The trust model is: the oracle is honest about game outcomes.
+
+### The `settleLoss` Method
+
+```typescript
+public settleLoss(houseSig: Sig) {
+  assert(checkSig(houseSig, this.house));
+}
+```
+
+When the player loses (busts or has a lower total than the dealer), the house claims the pot. Only the house's signature is required -- no oracle attestation is needed because the house is the beneficiary. The house would not falsely claim a loss.
+
+This asymmetry is by design. The player needs oracle proof to claim a win (because the house would otherwise dispute it). The house can claim a loss without proof (because the player has no incentive to dispute it -- the player already lost).
+
+### The `cancel` Method
+
+```typescript
+public cancel(playerSig: Sig, houseSig: Sig) {
+  assert(checkSig(playerSig, this.player));
+  assert(checkSig(houseSig, this.house));
+}
+```
+
+Both parties can mutually cancel the bet and split the funds. This is a safety valve for situations where the oracle is unavailable, the game server crashes, or both parties agree to void the bet.
+
+## Settlement Flow
+
+1. **Deploy** -- The player and house agree on terms. The contract is deployed with both public keys, the oracle's public key, and the bet amount. The UTXO is funded with the combined stakes (e.g., player bets 10,000 sats, house matches, UTXO holds 20,000 sats).
+
+2. **Play** -- The blackjack game is played off-chain through a game server or peer-to-peer protocol.
+
+3. **Oracle attestation** -- The oracle observes the final result and signs the player's hand total with their Rabin key.
+
+4. **Settlement** -- Based on the outcome:
+   - **Blackjack (21):** Player calls `settleBlackjack` with oracle signature. Receives 3:2 payout.
+   - **Win (1-21):** Player calls `settleWin` with their total and oracle signature. Receives 1:1 payout.
+   - **Loss:** House calls `settleLoss` with their signature. House takes the pot.
+   - **Cancel:** Both sign `cancel` if the game cannot be resolved.
+
+## Test Code
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('BlackjackBet', () => {
+  const playerKey = bsv.PrivateKey.fromRandom('testnet');
+  const houseKey = bsv.PrivateKey.fromRandom('testnet');
+  const playerPub = playerKey.toPublicKey().toString();
+  const housePub = houseKey.toPublicKey().toString();
+
+  const oraclePubKey = 123456789n; // Rabin public key (simplified for test)
+  const betAmount = 10000n;
+
+  it('should allow house to settle a loss', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/BlackjackBet.runar.ts',
+      'BlackjackBet'
+    );
+    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+
+    const result = await instance.call('settleLoss', {
+      houseSig: instance.sign(houseKey),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject loss settlement by non-house', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/BlackjackBet.runar.ts',
+      'BlackjackBet'
+    );
+    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+
+    const result = await instance.call('settleLoss', {
+      houseSig: instance.sign(playerKey),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should allow mutual cancellation', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/BlackjackBet.runar.ts',
+      'BlackjackBet'
+    );
+    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+
+    const result = await instance.call('cancel', {
+      playerSig: instance.sign(playerKey),
+      houseSig: instance.sign(houseKey),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject cancel with only one signature', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/BlackjackBet.runar.ts',
+      'BlackjackBet'
+    );
+    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+
+    const result = await instance.call('cancel', {
+      playerSig: instance.sign(playerKey),
+      houseSig: instance.sign(playerKey),
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+## Running the Example
+
+```bash
+# Compile
+runar compile contracts/BlackjackBet.runar.ts --output ./artifacts --asm
+
+# Test
+runar test
+
+# Deploy a bet (player + house combined stake)
+runar deploy ./artifacts/BlackjackBet.json \
+  --network testnet \
+  --key <deployer-WIF> \
+  --satoshis 20000
+```
+
+## Design Notes
+
+**Oracle trust model.** The oracle must be trusted to honestly report game outcomes. The contract cannot verify that the blackjack game was played fairly -- it only verifies the oracle's attestation. In production, you would use a well-known oracle service with a reputation to protect, or a decentralized oracle network.
+
+**Separate settlement methods.** Having distinct methods for blackjack, regular win, and loss keeps the script compact. Each method only contains the verification logic it needs. The `settleLoss` method is especially lightweight -- just a single signature check.
+
+**Why not use `StatefulSmartContract`?** This is a single-round bet with no intermediate state. The outcome is determined in one step: oracle signs, winner claims. There is no bidding process or multi-step interaction that would require state continuation.
+
+## Key Takeaways
+
+- Rabin oracle signatures (`verifyRabinSig`) enable on-chain verification of off-chain events.
+- `num2bin` converts numeric values to `ByteString` for oracle message encoding.
+- Multi-path settlement handles different game outcomes in separate methods.
+- Asymmetric verification: winners need oracle proof, losers do not.
+- Cooperative cancellation provides a safety valve when the oracle is unavailable.

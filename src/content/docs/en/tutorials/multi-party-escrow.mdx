@@ -1,0 +1,364 @@
+---
+title: "Multi-Party Escrow"
+description: "Build a multi-party escrow contract."
+section: "tutorials"
+order: 40
+lang: "en"
+---
+
+This tutorial shows you how to build a multi-party escrow contract where funds are locked until the involved parties agree on the outcome. It demonstrates multi-signature spending conditions, role-based authorization, and conditional release and refund flows -- all enforced on-chain by the contract's spending conditions.
+
+By the end of this tutorial, you will understand:
+
+- How to encode multiple roles (buyer, seller, arbiter) in a `SmartContract`
+- Multi-signature patterns using `checkSig`
+- How different public methods create different spending paths
+- The trade-offs between stateless and stateful escrow designs
+- Testing contracts with multiple key pairs and both success and failure scenarios
+
+## Prerequisites
+
+- Completed the [Hello World Tutorial](/docs/en/tutorials/hello-world)
+- Understanding of `SmartContract`, `checkSig`, and public methods
+
+## Understanding Escrow on BSV
+
+In a traditional escrow, a trusted third party holds funds until both the buyer and seller fulfill their obligations. On BSV, the escrow is the contract itself -- funds are locked in a UTXO, and the spending conditions define who can release or refund them under what circumstances.
+
+The contract has three participants:
+
+| Role | Description |
+| --- | --- |
+| **Buyer** | Deposits funds into the escrow |
+| **Seller** | Receives funds if the transaction completes |
+| **Arbiter** | Resolves disputes; can authorize refunds |
+
+The contract provides two spending paths:
+
+| Method | Required Signatures | Outcome |
+| --- | --- | --- |
+| `release` | Seller + Buyer | Funds go to the seller (both parties agree) |
+| `refund` | Buyer + Arbiter | Funds returned to the buyer (dispute resolved in buyer's favor) |
+
+This design ensures:
+- The seller cannot take the funds without the buyer's agreement.
+- The buyer cannot take the funds back without the arbiter's agreement.
+- The arbiter alone cannot move the funds -- they can only authorize refunds alongside the buyer.
+
+## Writing the Contract
+
+Create `contracts/Escrow.runar.ts`:
+
+```typescript
+import {
+  SmartContract,
+  assert,
+  PubKey,
+  Sig,
+  checkSig,
+} from 'runar-lang';
+
+class Escrow extends SmartContract {
+  readonly buyer: PubKey;
+  readonly seller: PubKey;
+  readonly arbiter: PubKey;
+
+  constructor(buyer: PubKey, seller: PubKey, arbiter: PubKey) {
+    super(buyer, seller, arbiter);
+    this.buyer = buyer;
+    this.seller = seller;
+    this.arbiter = arbiter;
+  }
+
+  public release(sellerSig: Sig, buyerSig: Sig) {
+    assert(checkSig(sellerSig, this.seller));
+    assert(checkSig(buyerSig, this.buyer));
+  }
+
+  public refund(buyerSig: Sig, arbiterSig: Sig) {
+    assert(checkSig(buyerSig, this.buyer));
+    assert(checkSig(arbiterSig, this.arbiter));
+  }
+}
+
+export { Escrow };
+```
+
+### Walkthrough
+
+#### Why Stateless?
+
+This escrow uses `SmartContract` (stateless) rather than `StatefulSmartContract`. The contract does not need to evolve over time -- it has two possible outcomes (release or refund), and either outcome fully spends the UTXO. There is no intermediate state to track.
+
+This is a common pattern: if your contract's lifecycle is "lock funds, then spend under one of N conditions," a stateless contract is the right choice. Simpler script, lower fees, no covenant overhead.
+
+#### The Three Roles
+
+```typescript
+readonly buyer: PubKey;
+readonly seller: PubKey;
+readonly arbiter: PubKey;
+```
+
+All three roles are `readonly` and set at deployment time. Each is a compressed public key (33 bytes). The roles are embedded directly in the locking script, so anyone can inspect the transaction to see who the participants are.
+
+#### The `release` Method
+
+```typescript
+public release(sellerSig: Sig, buyerSig: Sig) {
+  assert(checkSig(sellerSig, this.seller));
+  assert(checkSig(buyerSig, this.buyer));
+}
+```
+
+Release requires both the seller's and buyer's signatures. This represents the happy path -- the buyer received the goods or services and agrees to release payment. Both parties must cooperate.
+
+The seller's signature is checked first because the seller is the one constructing the release transaction. The buyer provides their signature as confirmation.
+
+#### The `refund` Method
+
+```typescript
+public refund(buyerSig: Sig, arbiterSig: Sig) {
+  assert(checkSig(buyerSig, this.buyer));
+  assert(checkSig(arbiterSig, this.arbiter));
+}
+```
+
+Refund requires the buyer's and arbiter's signatures. This is the dispute path -- the buyer claims the seller did not fulfill their obligations, and the arbiter agrees. The arbiter's role is to be an impartial judge.
+
+Notice the seller is not required for a refund. If the buyer and arbiter agree, the seller cannot block the refund. Similarly, the arbiter cannot unilaterally move funds -- they need the buyer's cooperation.
+
+#### What About Seller + Arbiter?
+
+The current contract intentionally does not include a `sellerRelease(sellerSig, arbiterSig)` method. If the seller and arbiter could release funds together without the buyer, it would create a collusion risk. The design forces the buyer to participate in any release of funds, which protects the buyer's interests.
+
+If your use case requires seller + arbiter release (for example, a marketplace where the buyer has disappeared), you can add a third public method:
+
+```typescript
+public arbitratedRelease(sellerSig: Sig, arbiterSig: Sig) {
+  assert(checkSig(sellerSig, this.seller));
+  assert(checkSig(arbiterSig, this.arbiter));
+}
+```
+
+This is a design decision, not a technical limitation.
+
+## Compiling
+
+```bash
+runar compile contracts/Escrow.runar.ts --output ./artifacts --asm
+```
+
+The compiled script will contain the three public keys and the `OP_CHECKSIG` operations. Because this is a stateless contract with only signature checks, the script is compact and efficient.
+
+## Testing the Escrow
+
+Create `tests/Escrow.test.ts`:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('Escrow', () => {
+  const buyerKey = bsv.PrivateKey.fromRandom('testnet');
+  const sellerKey = bsv.PrivateKey.fromRandom('testnet');
+  const arbiterKey = bsv.PrivateKey.fromRandom('testnet');
+  const buyerPub = buyerKey.toPublicKey().toString();
+  const sellerPub = sellerKey.toPublicKey().toString();
+  const arbiterPub = arbiterKey.toPublicKey().toString();
+
+  async function createEscrow() {
+    const contract = await TestContract.fromSource(
+      'contracts/Escrow.runar.ts',
+      'Escrow'
+    );
+    return contract.create(buyerPub, sellerPub, arbiterPub);
+  }
+
+  describe('release', () => {
+    it('should succeed with seller + buyer signatures', async () => {
+      const instance = await createEscrow();
+
+      const result = await instance.call('release', {
+        sellerSig: instance.sign(sellerKey),
+        buyerSig: instance.sign(buyerKey),
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should fail with wrong seller key', async () => {
+      const instance = await createEscrow();
+      const wrongKey = bsv.PrivateKey.fromRandom('testnet');
+
+      const result = await instance.call('release', {
+        sellerSig: instance.sign(wrongKey),
+        buyerSig: instance.sign(buyerKey),
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should fail with wrong buyer key', async () => {
+      const instance = await createEscrow();
+      const wrongKey = bsv.PrivateKey.fromRandom('testnet');
+
+      const result = await instance.call('release', {
+        sellerSig: instance.sign(sellerKey),
+        buyerSig: instance.sign(wrongKey),
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should fail with only seller signature', async () => {
+      const instance = await createEscrow();
+
+      // Seller tries to release alone (using seller key for both)
+      const result = await instance.call('release', {
+        sellerSig: instance.sign(sellerKey),
+        buyerSig: instance.sign(sellerKey),
+      });
+
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('refund', () => {
+    it('should succeed with buyer + arbiter signatures', async () => {
+      const instance = await createEscrow();
+
+      const result = await instance.call('refund', {
+        buyerSig: instance.sign(buyerKey),
+        arbiterSig: instance.sign(arbiterKey),
+      });
+
+      expect(result.success).toBe(true);
+    });
+
+    it('should fail without arbiter agreement', async () => {
+      const instance = await createEscrow();
+
+      // Buyer tries to refund alone
+      const result = await instance.call('refund', {
+        buyerSig: instance.sign(buyerKey),
+        arbiterSig: instance.sign(buyerKey),
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('should fail if seller tries to block refund', async () => {
+      const instance = await createEscrow();
+
+      // Seller cannot participate in the refund flow
+      const result = await instance.call('refund', {
+        buyerSig: instance.sign(buyerKey),
+        arbiterSig: instance.sign(sellerKey),
+      });
+
+      expect(result.success).toBe(false);
+    });
+  });
+});
+```
+
+Run the tests:
+
+```bash
+runar test
+```
+
+Expected output:
+
+```
+ ✓ tests/Escrow.test.ts (7 tests) 89ms
+   ✓ Escrow > release > should succeed with seller + buyer signatures
+   ✓ Escrow > release > should fail with wrong seller key
+   ✓ Escrow > release > should fail with wrong buyer key
+   ✓ Escrow > release > should fail with only seller signature
+   ✓ Escrow > refund > should succeed with buyer + arbiter signatures
+   ✓ Escrow > refund > should fail without arbiter agreement
+   ✓ Escrow > refund > should fail if seller tries to block refund
+
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+   Duration  421ms
+```
+
+## Deploying the Escrow
+
+The escrow deployment is typically initiated by the buyer, who locks their payment into the contract:
+
+```bash
+runar deploy ./artifacts/Escrow.json \
+  --network testnet \
+  --key <buyer-WIF-key> \
+  --satoshis 100000
+```
+
+The `--satoshis` amount is the escrowed payment. After deployment, the buyer shares the TxID with the seller and arbiter. All three participants can inspect the on-chain script to verify the contract terms.
+
+### Releasing Funds
+
+When both parties are satisfied, the seller constructs a release transaction and the buyer co-signs:
+
+```bash
+runar call <txid>:0 release \
+  --artifact ./artifacts/Escrow.json \
+  --network testnet \
+  --signers seller:<seller-WIF>,buyer:<buyer-WIF>
+```
+
+### Initiating a Refund
+
+If there is a dispute and the arbiter rules in the buyer's favor:
+
+```bash
+runar call <txid>:0 refund \
+  --artifact ./artifacts/Escrow.json \
+  --network testnet \
+  --signers buyer:<buyer-WIF>,arbiter:<arbiter-WIF>
+```
+
+## Design Variations
+
+### Adding a Timeout
+
+The current contract has no expiry. If one party disappears, the funds are locked forever. You can add a time-locked refund by using `StatefulSmartContract` with `extractLocktime`:
+
+```typescript
+public timeoutRefund(buyerSig: Sig, txPreimage: SigHashPreimage) {
+  assert(checkPreimage(txPreimage));
+  assert(extractLocktime(txPreimage) > this.deadline);
+  assert(checkSig(buyerSig, this.buyer));
+}
+```
+
+This allows the buyer to reclaim funds after the deadline without needing the arbiter.
+
+### M-of-N Variations
+
+The 2-of-3 pattern used here is the most common escrow design, but you can create other configurations:
+
+- **2-of-2** (buyer + seller only, no arbiter): Simpler but no dispute resolution.
+- **3-of-5** (committee escrow): For high-value transactions requiring broader consensus.
+- **1-of-3** (any party can release): Not recommended for escrow but useful for shared wallets.
+
+## Key Concepts Recap
+
+| Concept | What You Learned |
+| --- | --- |
+| Multi-signature patterns | Using `checkSig` with multiple public keys for role-based access |
+| Multiple public methods | Different spending paths (release vs. refund) in one contract |
+| Stateless design | Why escrow does not need `StatefulSmartContract` |
+| Role-based authorization | Buyer, seller, arbiter with different permissions |
+| Security considerations | Why certain role combinations are included or excluded |
+
+## What's Next
+
+- [Example Gallery](/docs/en/examples/gallery) -- Browse annotated contract examples including auctions, games, and oracle-based contracts
+- [Counter Example](/docs/en/examples/counter) -- The simplest stateful contract
+- [Tic-Tac-Toe Example](/docs/en/examples/token-swap) -- A two-player on-chain game with state management
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Deep dive into the type system and compiler constraints

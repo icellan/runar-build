@@ -1,0 +1,344 @@
+---
+title: "Price Bet"
+description: "Oracle-attested price wager contract where two parties bet on whether an asset price exceeds a strike price."
+section: "examples"
+order: 60
+lang: "en"
+---
+
+The price bet contract implements a binary options-style wager between two parties. Alice bets that the price of an asset will exceed a strike price; Bob bets it will not. A Rabin oracle attests to the actual price, and the contract pays the winner. This is one of the most practical oracle patterns in smart contract development: using a verifiable external data feed to drive on-chain settlement.
+
+## Contract Source
+
+```typescript
+import {
+  SmartContract,
+  assert,
+  PubKey,
+  Sig,
+  ByteString,
+  RabinSig,
+  RabinPubKey,
+  checkSig,
+  verifyRabinSig,
+  num2bin,
+} from 'runar-lang';
+
+class PriceBet extends SmartContract {
+  readonly alicePubKey: PubKey;
+  readonly bobPubKey: PubKey;
+  readonly oraclePubKey: RabinPubKey;
+  readonly strikePrice: bigint;
+
+  constructor(
+    alicePubKey: PubKey,
+    bobPubKey: PubKey,
+    oraclePubKey: RabinPubKey,
+    strikePrice: bigint
+  ) {
+    super(alicePubKey, bobPubKey, oraclePubKey, strikePrice);
+    this.alicePubKey = alicePubKey;
+    this.bobPubKey = bobPubKey;
+    this.oraclePubKey = oraclePubKey;
+    this.strikePrice = strikePrice;
+  }
+
+  public settle(
+    price: bigint,
+    rabinSig: RabinSig,
+    padding: ByteString,
+    aliceSig: Sig,
+    bobSig: Sig
+  ) {
+    const msg = num2bin(price, 8n);
+    assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
+    assert(price > 0n);
+    if (price > this.strikePrice) {
+      assert(checkSig(aliceSig, this.alicePubKey));
+    } else {
+      assert(checkSig(bobSig, this.bobPubKey));
+    }
+  }
+
+  public cancel(aliceSig: Sig, bobSig: Sig) {
+    assert(checkSig(aliceSig, this.alicePubKey));
+    assert(checkSig(bobSig, this.bobPubKey));
+  }
+}
+
+export { PriceBet };
+```
+
+## Annotations
+
+### Contract Design
+
+This contract encodes a straightforward binary bet:
+
+- **Alice** believes the price will be above the strike price.
+- **Bob** believes the price will be at or below the strike price.
+- Both parties deposit equal stakes into the contract UTXO.
+- An oracle provides the price attestation.
+- The winner takes the entire pot.
+
+### Properties
+
+```typescript
+readonly alicePubKey: PubKey;
+readonly bobPubKey: PubKey;
+readonly oraclePubKey: RabinPubKey;
+readonly strikePrice: bigint;
+```
+
+All properties are `readonly` (this is a stateless `SmartContract`). The bet terms are fixed at deployment:
+
+- **`alicePubKey`** / **`bobPubKey`** -- The two bettors' public keys.
+- **`oraclePubKey`** -- The Rabin public key of the price oracle. This oracle will sign the current price at the agreed-upon time.
+- **`strikePrice`** -- The threshold price. If the actual price exceeds this, Alice wins. Otherwise, Bob wins.
+
+### The `settle` Method
+
+This is the most interesting method in the contract. Let's trace the logic:
+
+```typescript
+public settle(price: bigint, rabinSig: RabinSig, padding: ByteString, aliceSig: Sig, bobSig: Sig) {
+```
+
+The method takes five arguments:
+- `price` -- The oracle-attested price value.
+- `rabinSig` -- The Rabin signature from the oracle.
+- `padding` -- The padding bytes required by Rabin verification.
+- `aliceSig` -- Alice's signature (only checked if Alice wins).
+- `bobSig` -- Bob's signature (only checked if Bob wins).
+
+```typescript
+const msg = num2bin(price, 8n);
+assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
+```
+
+First, verify the oracle's attestation. The price is encoded as an 8-byte `ByteString` using `num2bin`. The `verifyRabinSig` call confirms the oracle signed this exact price value. If someone provides a fake price, the signature verification fails.
+
+```typescript
+assert(price > 0n);
+```
+
+Basic sanity check: the price must be positive. This prevents edge cases with zero or negative values.
+
+```typescript
+if (price > this.strikePrice) {
+  assert(checkSig(aliceSig, this.alicePubKey));
+} else {
+  assert(checkSig(bobSig, this.bobPubKey));
+}
+```
+
+The conditional settlement. This is the key logic:
+
+- **If the price exceeds the strike price:** Alice wins. Her signature is verified so she can claim the pot. Bob's signature is not checked -- it does not matter whether Bob consents.
+- **If the price is at or below the strike price:** Bob wins. His signature is verified. Alice's signature is not checked.
+
+This conditional pattern is elegant because it only requires the winner's cooperation. The loser cannot block settlement. Once the oracle provides the price attestation, the winner can claim their funds unilaterally.
+
+**Important note on eager evaluation:** Runar uses eager evaluation for `&&` and `||`, but the `if/else` branch here means only one `checkSig` is actually reached. The branch that is not taken does not execute. However, both `aliceSig` and `bobSig` parameters must be provided in the unlocking script (the loser can provide a dummy signature).
+
+### The `cancel` Method
+
+```typescript
+public cancel(aliceSig: Sig, bobSig: Sig) {
+  assert(checkSig(aliceSig, this.alicePubKey));
+  assert(checkSig(bobSig, this.bobPubKey));
+}
+```
+
+Mutual cancellation requires both signatures. Use cases:
+
+- The oracle goes offline and cannot provide the price attestation.
+- Both parties agree the bet was made in error.
+- Market conditions make the bet meaningless (e.g., the asset was delisted).
+
+The `cancel` method is a safety mechanism. Without it, funds could be locked permanently if the oracle becomes unavailable.
+
+## Oracle Integration
+
+### How the Oracle Works
+
+The oracle is an off-chain service that:
+
+1. Monitors the price of the agreed-upon asset (e.g., BSV/USD).
+2. At the agreed-upon settlement time, reads the current price.
+3. Encodes the price as `num2bin(price, 8n)`.
+4. Signs the encoded price with their Rabin private key.
+5. Publishes the signature (or provides it to the bettors on request).
+
+The oracle does not know about the bet. It simply attests to a price. The same oracle signature can settle multiple bets with different strike prices simultaneously, because each bet independently verifies the same oracle message.
+
+### Rabin vs. ECDSA for Oracles
+
+Rabin signatures are preferred for oracle patterns in BSV smart contracts for several reasons:
+
+- **Script size** -- Rabin verification compiles to fewer Bitcoin Script opcodes than ECDSA verification.
+- **Cost** -- Smaller scripts mean lower transaction fees.
+- **Simplicity** -- The Rabin verification algorithm is straightforward modular arithmetic.
+
+The trade-off is that Rabin keys are larger than ECDSA keys, but for oracle use cases where the public key is embedded once in the contract and reused, this trade-off is favorable.
+
+### Message Encoding
+
+```typescript
+const msg = num2bin(price, 8n);
+```
+
+`num2bin` converts a `bigint` to a `ByteString` of a specified length. The `8n` means 8 bytes. Both the oracle and the contract must use the same encoding. If the oracle encodes the price in 4 bytes and the contract expects 8 bytes, the signature verification will fail even if the price is correct.
+
+This is a critical integration detail. When building oracle-based contracts, document the message encoding format precisely.
+
+## Test Code
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('PriceBet', () => {
+  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
+  const bobKey = bsv.PrivateKey.fromRandom('testnet');
+  const alicePub = aliceKey.toPublicKey().toString();
+  const bobPub = bobKey.toPublicKey().toString();
+
+  const oraclePubKey = 123456789n;
+  const strikePrice = 50000n; // e.g., $500.00 in cents
+
+  async function createBet() {
+    const contract = await TestContract.fromSource(
+      'contracts/PriceBet.runar.ts',
+      'PriceBet'
+    );
+    return contract.create(alicePub, bobPub, oraclePubKey, strikePrice);
+  }
+
+  it('should allow mutual cancellation', async () => {
+    const instance = await createBet();
+
+    const result = await instance.call('cancel', {
+      aliceSig: instance.sign(aliceKey),
+      bobSig: instance.sign(bobKey),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject cancel with only Alice signature', async () => {
+    const instance = await createBet();
+
+    const result = await instance.call('cancel', {
+      aliceSig: instance.sign(aliceKey),
+      bobSig: instance.sign(aliceKey),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should reject cancel with only Bob signature', async () => {
+    const instance = await createBet();
+
+    const result = await instance.call('cancel', {
+      aliceSig: instance.sign(bobKey),
+      bobSig: instance.sign(bobKey),
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+**Note on oracle testing:** Testing the `settle` method requires generating valid Rabin signatures, which involves the oracle's private key. In a real test suite, you would either:
+
+1. Use a test oracle with a known private key to generate valid signatures.
+2. Mock the `verifyRabinSig` function in the test environment.
+
+The cancel tests above verify the contract's multi-signature logic without requiring oracle integration.
+
+## Running the Example
+
+```bash
+# Compile
+runar compile contracts/PriceBet.runar.ts --output ./artifacts --asm
+
+# Test
+runar test
+
+# Deploy a price bet (both parties contribute equal stakes)
+runar deploy ./artifacts/PriceBet.json \
+  --network testnet \
+  --key <deployer-WIF> \
+  --satoshis 20000
+```
+
+## Settlement Scenarios
+
+### Scenario 1: Alice Wins
+
+Alice and Bob bet on the BSV/USD price with a strike price of $50.00. The oracle reports the price as $52.30.
+
+1. The oracle signs `num2bin(5230n, 8n)` with their Rabin key.
+2. Alice calls `settle` with `price = 5230n`, the oracle's signature, and her own signature.
+3. The contract verifies the oracle's attestation: `5230` is the signed price.
+4. `5230 > 5000` is true, so Alice's branch is taken.
+5. Alice's signature is verified. The UTXO is spent.
+6. Alice receives the entire pot.
+
+### Scenario 2: Bob Wins
+
+Same setup, but the oracle reports the price as $48.75.
+
+1. The oracle signs `num2bin(4875n, 8n)`.
+2. Bob calls `settle` with `price = 4875n`, the oracle's signature, and his own signature.
+3. `4875 > 5000` is false, so Bob's branch is taken.
+4. Bob's signature is verified. Bob receives the pot.
+
+### Scenario 3: Oracle Unavailable
+
+The oracle goes offline. Neither party can settle.
+
+1. Alice and Bob agree to cancel.
+2. Both sign the `cancel` transaction.
+3. Funds are returned to both parties.
+
+## Design Variations
+
+### Adding a Deadline
+
+The current contract has no expiry. You could add a timeout that allows one party to reclaim their share if the oracle does not provide a price by a certain block:
+
+```typescript
+public timeout(aliceSig: Sig, bobSig: Sig, txPreimage: SigHashPreimage) {
+  assert(checkPreimage(txPreimage));
+  assert(extractLocktime(txPreimage) > this.deadline);
+  assert(checkSig(aliceSig, this.alicePubKey));
+  assert(checkSig(bobSig, this.bobPubKey));
+}
+```
+
+### Multiple Oracles
+
+For higher-value bets, you might require attestations from multiple oracles to reduce single-point-of-failure risk:
+
+```typescript
+assert(verifyRabinSig(msg, rabinSig1, padding1, this.oracle1));
+assert(verifyRabinSig(msg, rabinSig2, padding2, this.oracle2));
+```
+
+Both oracles must agree on the price for settlement to proceed.
+
+### Range Bets
+
+Instead of a binary above/below bet, you could implement range bets (e.g., "the price will be between $45 and $55"). This would use additional `assert` conditions on the price value.
+
+## Key Takeaways
+
+- Rabin oracle signatures bridge off-chain data (asset prices) to on-chain logic.
+- `num2bin` encodes numeric values for consistent oracle message formatting.
+- Conditional `checkSig` in `if/else` branches enables winner-only settlement.
+- The loser cannot block settlement once the oracle provides the attestation.
+- Cooperative `cancel` provides a safety mechanism for oracle failure scenarios.
+- The same oracle signature can simultaneously settle multiple contracts with different strike prices.

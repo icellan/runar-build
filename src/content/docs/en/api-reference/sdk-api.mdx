@@ -1,0 +1,462 @@
+---
+title: "SDK API"
+description: "SDK method reference."
+section: "api-reference"
+order: 20
+lang: "en"
+---
+
+This page provides a complete reference for all public classes, methods, and types exposed by the `runar-sdk` package. Use it as a companion to the conceptual guides in the [SDK section](/docs/en/sdk/overview).
+
+## RunarContract
+
+The main class for interacting with deployed contracts.
+
+### Constructor
+
+```typescript
+new RunarContract(artifact: ContractArtifact, provider: Provider, signer: Signer)
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `artifact` | `ContractArtifact` | The compiled JSON artifact from `runar compile` |
+| `provider` | `Provider` | Network provider for fetching UTXOs and broadcasting |
+| `signer` | `Signer` | Signs transactions on behalf of the caller |
+
+### Static Methods
+
+#### fromTxId()
+
+Reconstruct a contract instance from an existing on-chain deployment.
+
+```typescript
+static async fromTxId(
+  txId: string,
+  provider: Provider,
+  artifact: ContractArtifact
+): Promise<RunarContract>
+```
+
+Fetches the transaction from the network, extracts the locking script, and recreates the contract instance with its current state.
+
+```typescript
+const contract = await RunarContract.fromTxId(
+  'a1b2c3d4e5f6...',
+  provider,
+  artifact
+);
+console.log('Current state:', contract.state);
+```
+
+### Instance Methods
+
+#### deploy()
+
+Deploy the contract to the network.
+
+```typescript
+async deploy(
+  constructorArgs: Record<string, any>,
+  satoshis: number
+): Promise<DeployResult>
+```
+
+```typescript
+interface DeployResult {
+  txId: string;
+  outputIndex: number;
+  script: string;
+  satoshis: number;
+}
+```
+
+```typescript
+const result = await contract.deploy(
+  { pubKeyHash: '89abcdef...' },
+  10000
+);
+console.log('Deployed at:', result.txId);
+```
+
+#### call()
+
+Invoke a public method on the deployed contract.
+
+```typescript
+async call(
+  methodName: string,
+  args: Record<string, any>,
+  options?: CallOptions
+): Promise<CallResult>
+```
+
+```typescript
+interface CallOptions {
+  // Additional satoshis to send with the call transaction
+  satoshis?: number;
+  // Specific UTXO to spend (default: auto-select)
+  utxo?: UTXO;
+  // Fee rate in satoshis per byte (default: 1)
+  feeRate?: number;
+}
+
+interface CallResult {
+  txId: string;
+  success: boolean;
+  error?: string;
+}
+```
+
+```typescript
+const result = await contract.call('unlock', {
+  sig: await signer.sign(tx),
+  pubKey: signer.publicKey,
+});
+```
+
+#### connect()
+
+Attach a different provider and/or signer to the contract.
+
+```typescript
+connect(provider?: Provider, signer?: Signer): RunarContract
+```
+
+Returns a new `RunarContract` instance bound to the given provider and signer. The original instance is not modified.
+
+```typescript
+const mainnetContract = contract.connect(mainnetProvider, mainnetSigner);
+```
+
+#### setState()
+
+Manually set the contract state. Useful for testing or resuming from a known state.
+
+```typescript
+setState(state: Record<string, any>): void
+```
+
+```typescript
+contract.setState({ count: 42n, owner: '02aabb...' });
+```
+
+#### state (getter)
+
+Read the current contract state.
+
+```typescript
+get state: Record<string, any>
+```
+
+```typescript
+console.log('Count:', contract.state.count);
+console.log('Owner:', contract.state.owner);
+```
+
+#### getLockingScript()
+
+Get the compiled locking script with constructor arguments substituted.
+
+```typescript
+getLockingScript(constructorArgs: Record<string, any>): string
+```
+
+Returns a hex-encoded Bitcoin Script string.
+
+#### buildUnlockingScript()
+
+Build the unlocking script for a given method call.
+
+```typescript
+buildUnlockingScript(
+  methodName: string,
+  args: Record<string, any>
+): string
+```
+
+Returns a hex-encoded unlocking script. This is useful for manual transaction construction.
+
+## Providers
+
+Providers handle network communication -- fetching UTXOs, broadcasting transactions, and querying the blockchain.
+
+### WhatsOnChainProvider
+
+Connects to the WhatsOnChain API.
+
+```typescript
+new WhatsOnChainProvider(network: 'mainnet' | 'testnet', apiKey?: string)
+```
+
+```typescript
+const provider = new WhatsOnChainProvider('testnet');
+const provider = new WhatsOnChainProvider('mainnet', 'your-api-key');
+```
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `getUtxos` | `(address: string) => Promise<UTXO[]>` | Fetch UTXOs for an address |
+| `broadcast` | `(rawTx: string) => Promise<string>` | Broadcast a raw transaction, returns TxID |
+| `getTx` | `(txId: string) => Promise<Transaction>` | Fetch a transaction by ID |
+| `getBlockHeight` | `() => Promise<number>` | Get the current block height |
+
+### MockProvider
+
+An in-memory provider for testing. Does not connect to any network.
+
+```typescript
+new MockProvider()
+```
+
+```typescript
+const mock = new MockProvider();
+// Pre-load UTXOs for testing
+mock.addUtxo({
+  txId: 'abc123...',
+  outputIndex: 0,
+  script: '76a914...88ac',
+  satoshis: 10000,
+});
+```
+
+**Additional methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `addUtxo` | `(utxo: UTXO) => void` | Add a UTXO to the mock state |
+| `getMempool` | `() => Transaction[]` | Get all broadcast transactions |
+| `reset` | `() => void` | Clear all mock state |
+
+### RPCProvider
+
+Connects to a BSV node via JSON-RPC.
+
+```typescript
+new RPCProvider(url: string, credentials?: { user: string; pass: string })
+```
+
+```typescript
+const provider = new RPCProvider('http://localhost:8332', {
+  user: 'rpcuser',
+  pass: 'rpcpassword',
+});
+```
+
+Supports all the same methods as `WhatsOnChainProvider` plus additional RPC-specific methods like `getRawMempool()` and `getBlock()`.
+
+## Signers
+
+Signers produce signatures for transactions.
+
+### LocalSigner
+
+Signs with a private key held in memory.
+
+```typescript
+new LocalSigner(privateKeyWIF: string)
+```
+
+```typescript
+const signer = new LocalSigner('cN1r3...');
+console.log('Address:', signer.address);
+console.log('Public key:', signer.publicKey);
+```
+
+**Properties and methods:**
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `publicKey` | `string` | The signer's public key (hex) |
+| `address` | `string` | The signer's BSV address |
+| `sign(tx)` | `(tx: Transaction) => Promise<Sig>` | Sign a transaction |
+| `signMessage(msg)` | `(msg: string) => Promise<string>` | Sign an arbitrary message |
+
+### ExternalSigner
+
+Delegates signing to an external service or hardware device.
+
+```typescript
+new ExternalSigner(signCallback: SignCallback)
+```
+
+```typescript
+interface SignCallback {
+  sign(txHex: string, inputIndex: number): Promise<string>;
+  getPublicKey(): Promise<string>;
+}
+
+const signer = new ExternalSigner({
+  sign: async (txHex, inputIndex) => {
+    // Send to hardware wallet, external API, etc.
+    return await hardwareWallet.sign(txHex, inputIndex);
+  },
+  getPublicKey: async () => {
+    return await hardwareWallet.getPublicKey();
+  },
+});
+```
+
+### WalletSigner
+
+Integrates with browser wallet extensions (e.g., Yours Wallet, HandCash Connect).
+
+```typescript
+new WalletSigner(walletAdapter: WalletAdapter)
+```
+
+```typescript
+const signer = new WalletSigner(window.yoursWallet);
+```
+
+The `WalletAdapter` interface matches the standard BSV wallet API. Any wallet extension that implements `sign()` and `getPublicKey()` is compatible.
+
+## TokenWallet
+
+Manages fungible token UTXOs and provides high-level token operations.
+
+```typescript
+new TokenWallet(options: TokenWalletOptions)
+```
+
+```typescript
+interface TokenWalletOptions {
+  tokenId: string;       // Minting transaction ID
+  provider: Provider;
+  signer: Signer;
+}
+```
+
+### Methods
+
+#### getBalance()
+
+```typescript
+async getBalance(): Promise<bigint>
+```
+
+Returns the total token balance across all owned UTXOs.
+
+#### transfer()
+
+```typescript
+async transfer(
+  recipient: PubKey,
+  amount: bigint,
+  options?: TransferOptions
+): Promise<TransferResult>
+```
+
+Transfers tokens to a recipient. Automatically selects UTXOs and splits/merges as needed.
+
+#### merge()
+
+```typescript
+async merge(options?: MergeOptions): Promise<MergeResult>
+```
+
+Consolidates multiple token UTXOs into fewer, larger UTXOs.
+
+```typescript
+interface MergeOptions {
+  minAmount?: bigint;  // Only merge UTXOs below this amount
+  maxInputs?: number;  // Max UTXOs to merge per transaction (default: 2)
+}
+```
+
+#### getUtxos()
+
+```typescript
+async getUtxos(): Promise<TokenUTXO[]>
+```
+
+Returns all token UTXOs owned by the signer.
+
+```typescript
+interface TokenUTXO {
+  txId: string;
+  outputIndex: number;
+  amount: bigint;
+  script: string;
+}
+```
+
+## Utility Functions
+
+### State Serialization
+
+```typescript
+// Serialize a state object to a ByteString for embedding in script
+function serializeState(state: Record<string, any>): string;
+
+// Deserialize state from a ByteString back to an object
+function deserializeState(data: string, abi: ABI): Record<string, any>;
+
+// Extract state from an on-chain locking script
+function extractStateFromScript(script: string, abi: ABI): Record<string, any>;
+```
+
+### Transaction Building
+
+```typescript
+// Compute the OP_PUSH_TX preimage for a transaction
+function computeOpPushTx(
+  tx: Transaction,
+  inputIndex: number,
+  sigHashType: number
+): string;
+
+// Build a deployment transaction
+function buildDeployTransaction(
+  artifact: ContractArtifact,
+  constructorArgs: Record<string, any>,
+  utxos: UTXO[],
+  satoshis: number,
+  changeAddress: string
+): Transaction;
+
+// Build a method call transaction
+function buildCallTransaction(
+  contract: RunarContract,
+  methodName: string,
+  args: Record<string, any>,
+  utxos: UTXO[],
+  changeAddress: string
+): Transaction;
+```
+
+### UTXO Selection
+
+```typescript
+// Select UTXOs to cover a target amount plus fees
+function selectUtxos(
+  utxos: UTXO[],
+  targetAmount: number,
+  feeRate?: number
+): { selected: UTXO[]; fee: number; change: number };
+
+// Estimate the fee for deploying a contract
+function estimateDeployFee(
+  artifact: ContractArtifact,
+  constructorArgs: Record<string, any>,
+  feeRate?: number
+): number;
+```
+
+### Code Generation
+
+```typescript
+// Generate TypeScript type definitions from a compiled artifact
+function generateTypescript(artifact: ContractArtifact): string;
+```
+
+Produces a `.d.ts` file with typed method signatures, constructor parameters, and state fields. Useful for IDE autocompletion when interacting with contracts.
+
+```typescript
+import { generateTypescript } from 'runar-sdk';
+
+const types = generateTypescript(artifact);
+writeFileSync('./types/P2PKH.d.ts', types);
+```

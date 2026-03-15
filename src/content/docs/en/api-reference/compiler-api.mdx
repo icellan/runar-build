@@ -1,0 +1,395 @@
+---
+title: "Compiler API"
+description: "Programmatic compiler interface."
+section: "api-reference"
+order: 10
+lang: "en"
+---
+
+The Runar compiler can be invoked programmatically in addition to the CLI. This page documents the public API for integrating the compiler into custom build pipelines, editor tooling, and automated workflows. The compiler is distributed as the `runar-compiler` npm package.
+
+## Importing the Compiler Module
+
+```typescript
+import {
+  compile,
+  parse,
+  parseSolSource,
+  parseMoveSource,
+  parsePythonSource,
+  validate,
+  typecheck,
+  lowerToANF,
+} from 'runar-compiler';
+```
+
+All functions are synchronous and pure -- they take input, produce output, and have no side effects. They do not read from the filesystem or network. If you need to compile a file, read it first and pass the source string.
+
+## compile()
+
+The primary entry point. Takes a source string and returns a compiled artifact.
+
+### Signature
+
+```typescript
+function compile(source: string, options?: CompileOptions): CompileResult;
+```
+
+### Parameters
+
+**`source: string`** -- The Runar contract source code. Can be TypeScript, Solidity, Move, or Python syntax depending on the file extension hint.
+
+**`options?: CompileOptions`** -- Optional configuration:
+
+```typescript
+interface CompileOptions {
+  // Source language hint. Auto-detected from fileHint extension if omitted.
+  // Values: 'typescript' | 'solidity' | 'move' | 'python'
+  language?: string;
+
+  // File path hint for error messages and source maps.
+  fileHint?: string;
+
+  // Include human-readable ASM in the output (default: false).
+  asm?: boolean;
+
+  // Include source map in the output (default: true).
+  sourceMap?: boolean;
+
+  // Optimization level: 0 (none), 1 (basic), 2 (aggressive). Default: 1.
+  optimize?: 0 | 1 | 2;
+
+  // Target network for output encoding (default: 'mainnet').
+  network?: 'mainnet' | 'testnet';
+
+  // Maximum allowed script size in bytes. Compilation fails if exceeded.
+  maxScriptSize?: number;
+}
+```
+
+### Return Value
+
+```typescript
+interface CompileResult {
+  // Whether compilation succeeded.
+  success: boolean;
+
+  // The compiled artifact (present if success is true).
+  artifact?: {
+    version: number;
+    compilerVersion: string;
+    contractName: string;
+    abi: ABI;
+    script: string;       // Hex-encoded Bitcoin Script
+    asm?: string;          // Human-readable ASM (if options.asm was true)
+    sourceMap?: SourceMap; // Source map (if options.sourceMap was true)
+    buildTimestamp: string;
+  };
+
+  // Compilation errors (present if success is false).
+  errors?: CompileError[];
+
+  // Compilation warnings (may be present even on success).
+  warnings?: CompileWarning[];
+
+  // Performance metrics.
+  stats?: {
+    parseTime: number;    // milliseconds
+    typeCheckTime: number;
+    lowerTime: number;
+    emitTime: number;
+    totalTime: number;
+    scriptSize: number;   // bytes
+  };
+}
+```
+
+### Example
+
+```typescript
+import { compile } from 'runar-compiler';
+import { readFileSync } from 'node:fs';
+
+const source = readFileSync('./contracts/P2PKH.runar.ts', 'utf8');
+
+const result = compile(source, {
+  fileHint: 'P2PKH.runar.ts',
+  asm: true,
+  optimize: 2,
+});
+
+if (result.success) {
+  console.log('Contract:', result.artifact.contractName);
+  console.log('Script size:', result.stats.scriptSize, 'bytes');
+  console.log('ASM:', result.artifact.asm);
+} else {
+  for (const err of result.errors) {
+    console.error(`${err.file}:${err.line}:${err.col} ${err.message}`);
+  }
+}
+```
+
+## parse()
+
+Parses a TypeScript Runar source string into an AST without performing type checking or validation.
+
+### Signature
+
+```typescript
+function parse(source: string, fileName?: string): ParseResult;
+```
+
+### Parameters
+
+**`source: string`** -- The TypeScript Runar contract source code.
+
+**`fileName?: string`** -- Optional file name for error messages.
+
+### Return Value
+
+```typescript
+interface ParseResult {
+  success: boolean;
+  ast?: ContractNode;    // The root AST node (if success is true)
+  errors?: ParseError[]; // Parse errors (if success is false)
+}
+```
+
+### Example
+
+```typescript
+const parseResult = parse(source, 'P2PKH.runar.ts');
+if (parseResult.success) {
+  console.log('Contract name:', parseResult.ast.name);
+  console.log('Methods:', parseResult.ast.methods.map(m => m.name));
+}
+```
+
+## Language-Specific Parsers
+
+Runar supports four frontend languages. Each has a dedicated parser that produces the same `ContractNode` AST:
+
+### parseSolSource()
+
+```typescript
+function parseSolSource(source: string): ParseResult;
+```
+
+Parses Solidity-syntax Runar contracts. Accepts standard Solidity contract declarations with Runar-specific annotations.
+
+```typescript
+const result = parseSolSource(`
+  pragma runar ^0.1.0;
+  contract P2PKH {
+    Ripemd160 pubKeyHash;
+    function unlock(Sig sig, PubKey pubKey) public {
+      require(hash160(pubKey) == pubKeyHash);
+      require(checkSig(sig, pubKey));
+    }
+  }
+`);
+```
+
+### parseMoveSource()
+
+```typescript
+function parseMoveSource(source: string): ParseResult;
+```
+
+Parses Move-syntax Runar contracts. Accepts Move module declarations with Runar-specific types.
+
+```typescript
+const result = parseMoveSource(`
+  module P2PKH {
+    struct Contract has key {
+      pub_key_hash: Ripemd160,
+    }
+    public fun unlock(sig: Sig, pub_key: PubKey, self: &Contract) {
+      assert!(hash160(pub_key) == self.pub_key_hash);
+      assert!(check_sig(sig, pub_key));
+    }
+  }
+`);
+```
+
+### parsePythonSource()
+
+```typescript
+function parsePythonSource(source: string): ParseResult;
+```
+
+Parses Python-syntax Runar contracts. Accepts class definitions with type annotations.
+
+```typescript
+const result = parsePythonSource(`
+  class P2PKH(SmartContract):
+    pub_key_hash: Ripemd160
+
+    def unlock(self, sig: Sig, pub_key: PubKey):
+      assert hash160(pub_key) == self.pub_key_hash
+      assert check_sig(sig, pub_key)
+`);
+```
+
+## validate()
+
+Performs semantic validation on a parsed AST. Checks for disallowed language features, missing constructors, improper `super()` calls, and structural correctness.
+
+### Signature
+
+```typescript
+function validate(contract: ContractNode): ValidationResult;
+```
+
+### Return Value
+
+```typescript
+interface ValidationResult {
+  valid: boolean;
+  errors?: ValidationError[];
+  warnings?: ValidationWarning[];
+}
+```
+
+### Example
+
+```typescript
+const parseResult = parse(source);
+if (parseResult.success) {
+  const validationResult = validate(parseResult.ast);
+  if (!validationResult.valid) {
+    for (const err of validationResult.errors) {
+      console.error(`Validation: ${err.message} at ${err.line}:${err.col}`);
+    }
+  }
+}
+```
+
+## typecheck()
+
+Performs type checking on a validated AST. Verifies type correctness, affine type usage, and on-chain type compatibility.
+
+### Signature
+
+```typescript
+function typecheck(contract: ContractNode): TypeCheckResult;
+```
+
+### Return Value
+
+```typescript
+interface TypeCheckResult {
+  valid: boolean;
+  errors?: TypeError[];
+  // Resolved type information for each node
+  typeMap?: Map<string, ResolvedType>;
+}
+```
+
+### Example
+
+```typescript
+const typeResult = typecheck(parseResult.ast);
+if (!typeResult.valid) {
+  for (const err of typeResult.errors) {
+    console.error(`Type error: ${err.message}`);
+    if (err.expected && err.actual) {
+      console.error(`  Expected: ${err.expected}, got: ${err.actual}`);
+    }
+  }
+}
+```
+
+## lowerToANF()
+
+Lowers a type-checked AST to Administrative Normal Form (ANF) intermediate representation. This is the IR that feeds into the Bitcoin Script code generator.
+
+### Signature
+
+```typescript
+function lowerToANF(contract: ContractNode): ANFProgram;
+```
+
+### Return Value
+
+```typescript
+interface ANFProgram {
+  name: string;
+  methods: ANFMethod[];
+  stateFields: ANFField[];
+  constructorParams: ANFField[];
+}
+
+interface ANFMethod {
+  name: string;
+  params: ANFField[];
+  body: ANFExpression[];
+}
+```
+
+### Example
+
+```typescript
+const anf = lowerToANF(parseResult.ast);
+console.log('ANF methods:', anf.methods.map(m => m.name));
+console.log('ANF body ops:', anf.methods[0].body.length);
+```
+
+The ANF IR is useful for custom analysis tools, optimization passes, or feeding into the `RunarInterpreter` for reference execution.
+
+## Error Types
+
+All error objects share a common shape:
+
+```typescript
+interface CompilerDiagnostic {
+  message: string;       // Human-readable error description
+  file?: string;         // Source file (from fileHint)
+  line?: number;         // 1-based line number
+  col?: number;          // 1-based column number
+  code?: string;         // Machine-readable error code (e.g., 'E001')
+  severity: 'error' | 'warning' | 'info';
+}
+```
+
+### Error Codes
+
+| Code | Description |
+|------|-------------|
+| `E001` | Parse error: syntax error |
+| `E002` | Parse error: unexpected token |
+| `E010` | Validation: disallowed language feature |
+| `E011` | Validation: missing constructor |
+| `E012` | Validation: missing super() call |
+| `E020` | Type error: type mismatch |
+| `E021` | Type error: affine type used more than once |
+| `E022` | Type error: unknown type |
+| `E030` | Codegen: script too large |
+| `E031` | Codegen: estimated stack overflow |
+| `W001` | Warning: large script size |
+| `W002` | Warning: unused variable |
+| `W003` | Warning: shadowed variable |
+
+## Plugin and Extension Points
+
+The compiler pipeline is structured as a sequence of phases: parse, validate, typecheck, lower, optimize, emit. Each phase is a standalone function, so you can insert custom processing between any two phases:
+
+```typescript
+import { parse, validate, typecheck, lowerToANF } from 'runar-compiler';
+
+// Custom pipeline with analysis between phases
+const ast = parse(source).ast;
+validate(ast);
+typecheck(ast);
+
+// Insert custom analysis here
+const complexity = analyzeComplexity(ast);
+if (complexity > threshold) {
+  console.warn('Contract complexity exceeds recommended threshold');
+}
+
+const anf = lowerToANF(ast);
+// Feed ANF to custom code generator or analysis tool
+```
+
+This modular design makes it straightforward to build editor integrations (parse + typecheck for diagnostics), documentation generators (parse + extract metadata), or custom optimizers (lower + transform + emit).

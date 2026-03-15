@@ -1,0 +1,430 @@
+---
+title: "CLI Reference"
+description: "Command-line tool reference."
+section: "api-reference"
+order: 40
+lang: "en"
+---
+
+The Runar CLI is the primary interface for creating projects, compiling contracts, running tests, and deploying to the BSV network. This page documents every available command and flag. The CLI is distributed as the `runar-cli` npm package and invoked with the `runar` command.
+
+## Global Options and Configuration
+
+These options apply to all commands:
+
+```bash
+runar [command] [options]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--version`, `-v` | Print the Runar CLI version |
+| `--help`, `-h` | Show help for the command |
+| `--config <path>` | Path to a `runar.config.ts` file (default: auto-detect in project root) |
+| `--verbose` | Enable verbose output with detailed logs |
+| `--quiet` | Suppress all output except errors |
+| `--color` / `--no-color` | Force-enable or disable colored output |
+
+### Configuration File
+
+The CLI reads configuration from `runar.config.ts` in the project root:
+
+```typescript
+// runar.config.ts
+export default {
+  // Compiler options
+  compiler: {
+    optimize: 1,         // Optimization level: 0, 1, or 2
+    sourceMap: true,      // Include source maps in artifacts
+    maxScriptSize: 65536, // Max script size in bytes
+  },
+
+  // Test runner options
+  test: {
+    dir: 'tests',
+    timeout: 30000,
+    fuzz: false,
+    fuzzRuns: 1000,
+  },
+
+  // Deployment options
+  deploy: {
+    network: 'testnet',
+    feeRate: 1,          // Satoshis per byte
+  },
+
+  // Codegen options
+  codegen: {
+    outputDir: './types',
+    language: 'typescript',
+  },
+};
+```
+
+All options can be overridden with command-line flags. CLI flags take precedence over configuration file values.
+
+## runar init
+
+Scaffold a new Runar project.
+
+```bash
+runar init <project-name> [options]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `project-name` | Name of the project directory to create |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--template <name>` | `default` | Project template to use |
+| `--language <lang>` | `typescript` | Primary contract language: `typescript`, `solidity`, `move`, `python`, `go`, `rust` |
+| `--package-manager <pm>` | `pnpm` | Package manager: `pnpm`, `npm`, `yarn` |
+| `--no-git` | | Do not initialize a git repository |
+| `--no-install` | | Do not install dependencies after scaffolding |
+
+### Available Templates
+
+| Template | Description |
+|----------|-------------|
+| `default` | Minimal project with a P2PKH example contract |
+| `token` | Fungible token contract with split/merge/transfer |
+| `stateful` | Stateful counter contract with state transitions |
+| `oracle` | Oracle-dependent contract with Rabin signature verification |
+| `empty` | Bare project structure with no example contracts |
+
+### Example
+
+```bash
+# Create a TypeScript project with the default template
+runar init my-project
+
+# Create a Solidity project with the token template
+runar init my-token --language solidity --template token
+
+# Create without git or automatic install
+runar init my-project --no-git --no-install
+```
+
+### Generated Structure
+
+```
+my-project/
+  contracts/           # Contract source files
+    P2PKH.runar.ts
+  tests/               # Test files
+    P2PKH.test.ts
+  artifacts/           # Compiled output (gitignored)
+  runar.config.ts      # Project configuration
+  package.json
+  tsconfig.json
+  .gitignore
+```
+
+## runar compile
+
+Compile one or more Runar contracts to Bitcoin Script artifacts.
+
+```bash
+runar compile <source...> [options]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `source` | One or more contract source files or a glob pattern |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output <dir>`, `-o` | `./artifacts` | Output directory for compiled artifacts |
+| `--asm` | `false` | Include human-readable ASM in the artifact |
+| `--source-map` | `true` | Include source map in the artifact |
+| `--optimize <level>` | `1` | Optimization level: `0` (none), `1` (basic), `2` (aggressive) |
+| `--network <net>` | `mainnet` | Target network: `mainnet` or `testnet` |
+| `--max-script-size <n>` | `65536` | Fail if script exceeds this size in bytes |
+| `--watch`, `-w` | `false` | Watch for file changes and recompile |
+
+### Examples
+
+```bash
+# Compile a single contract
+runar compile contracts/P2PKH.runar.ts
+
+# Compile all contracts in a directory
+runar compile contracts/*.runar.ts
+
+# Compile with ASM output and aggressive optimization
+runar compile contracts/PriceBet.runar.ts --asm --optimize 2
+
+# Compile for testnet
+runar compile contracts/P2PKH.runar.ts --network testnet
+
+# Watch mode for development
+runar compile contracts/*.runar.ts --watch
+```
+
+### Output
+
+For each source file, the compiler produces a JSON artifact:
+
+```
+artifacts/
+  P2PKH.json
+  PriceBet.json
+```
+
+The artifact format is documented in [Output Artifacts](/docs/en/compiler/output-artifacts).
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Compilation succeeded |
+| `1` | Compilation failed (errors in source) |
+| `2` | Configuration or file system error |
+
+## runar test
+
+Run the test suite.
+
+```bash
+runar test [files...] [options]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `files` | Optional test files to run (default: all files in test directory) |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--filter <pattern>` | | Run only tests matching this name pattern |
+| `--watch`, `-w` | `false` | Watch mode: re-run tests on file changes |
+| `--verbose` | `false` | Show detailed output including script traces |
+| `--coverage` | `false` | Generate a code coverage report |
+| `--sequence` | `false` | Run tests sequentially instead of in parallel |
+| `--timeout <ms>` | `30000` | Per-test timeout in milliseconds |
+| `--conformance` | `false` | Run cross-compiler conformance tests |
+| `--update-golden` | `false` | Update golden files (use with `--conformance`) |
+| `--fuzz` | `false` | Enable property-based fuzz tests |
+| `--fuzz-runs <n>` | `1000` | Number of fuzz iterations |
+| `--fuzz-seed <n>` | random | Seed for deterministic fuzz runs |
+
+### Examples
+
+```bash
+# Run all tests
+runar test
+
+# Run a specific test file
+runar test tests/PriceBet.test.ts
+
+# Filter by test name
+runar test --filter "settles to Alice"
+
+# Run with coverage
+runar test --coverage
+
+# Run fuzz tests with a fixed seed
+runar test --fuzz --fuzz-runs 5000 --fuzz-seed 42
+
+# Run cross-compiler conformance
+runar test --conformance
+```
+
+### Output
+
+Test output follows the vitest format with contract-specific enhancements. See [The Test Runner](/docs/en/testing-and-debugging/test-runner) for details.
+
+## runar deploy
+
+Deploy a compiled contract to the BSV network.
+
+```bash
+runar deploy <artifact> [options]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `artifact` | Path to the compiled JSON artifact |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--network <net>` | `testnet` | Target network: `mainnet` or `testnet` |
+| `--key <wif>` | | WIF-encoded private key for funding |
+| `--key-file <path>` | | Path to a file containing the WIF key |
+| `--satoshis <n>` | `1000` | Satoshis to lock in the contract output |
+| `--fee-rate <n>` | `1` | Fee rate in satoshis per byte |
+| `--args <json>` | `{}` | Constructor arguments as a JSON string |
+| `--args-file <path>` | | Path to a JSON file with constructor arguments |
+| `--dry-run` | `false` | Calculate fees and build the transaction without broadcasting |
+| `--broadcast-timeout <ms>` | `30000` | Timeout for broadcast confirmation |
+
+### Examples
+
+```bash
+# Deploy to testnet
+runar deploy ./artifacts/P2PKH.json \
+  --network testnet \
+  --key cN1r3... \
+  --satoshis 10000 \
+  --args '{"pubKeyHash": "89abcdef..."}'
+
+# Dry run to estimate fees
+runar deploy ./artifacts/PriceBet.json \
+  --network testnet \
+  --dry-run \
+  --satoshis 50000
+
+# Deploy to mainnet with key file
+runar deploy ./artifacts/Token.json \
+  --network mainnet \
+  --key-file ./keys/mainnet.wif \
+  --satoshis 1000 \
+  --args-file ./deploy-args.json
+```
+
+### Output
+
+```
+Contract deployed successfully.
+  Network:  testnet
+  TxID:     a1b2c3d4e5f6...
+  Output:   0
+  Satoshis: 10000
+  Script:   76a914...88ac
+  Fee:      226 satoshis
+```
+
+### Security Notes
+
+- Never pass mainnet private keys as CLI arguments in shared environments (the key appears in shell history). Use `--key-file` instead.
+- The `--dry-run` flag is recommended before mainnet deployments to verify fees and transaction structure.
+
+## runar verify
+
+Verify that an on-chain contract matches a compiled artifact.
+
+```bash
+runar verify <txid> [options]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `txid` | Transaction ID of the deployed contract |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--artifact <path>` | | Path to the compiled artifact to compare against |
+| `--network <net>` | `testnet` | Network to query |
+| `--output-index <n>` | `0` | Output index containing the contract |
+| `--status-only` | `false` | Only check transaction confirmation status |
+
+### Examples
+
+```bash
+# Verify a deployment
+runar verify a1b2c3d4e5f6... \
+  --artifact ./artifacts/P2PKH.json \
+  --network testnet
+
+# Check transaction status only
+runar verify a1b2c3d4e5f6... --network testnet --status-only
+```
+
+### Output
+
+```
+Verification passed.
+  Contract:     P2PKH
+  TxID:         a1b2c3d4e5f6...
+  Output:       0
+  Script match: yes
+  Confirmations: 3
+```
+
+## runar codegen
+
+Generate typed bindings from a compiled artifact.
+
+```bash
+runar codegen <artifact...> [options]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `artifact` | One or more compiled JSON artifacts |
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output <dir>`, `-o` | `./types` | Output directory for generated files |
+| `--language <lang>` | `typescript` | Target language: `typescript`, `go`, `rust` |
+
+### Examples
+
+```bash
+# Generate TypeScript types
+runar codegen ./artifacts/P2PKH.json --output ./types
+
+# Generate types for all artifacts
+runar codegen ./artifacts/*.json
+
+# Generate Go bindings
+runar codegen ./artifacts/Token.json --language go --output ./bindings
+```
+
+### Generated Output
+
+For a P2PKH contract, `runar codegen` produces:
+
+```typescript
+// types/P2PKH.ts
+import { RunarContract, Sig, PubKey, Ripemd160 } from 'runar-sdk';
+
+export interface P2PKHConstructorArgs {
+  pubKeyHash: Ripemd160;
+}
+
+export interface P2PKHMethods {
+  unlock(args: { sig: Sig; pubKey: PubKey }): Promise<CallResult>;
+}
+
+export type P2PKHContract = RunarContract & P2PKHMethods;
+```
+
+This gives you full IDE autocompletion and type checking when interacting with contracts through the SDK.
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `RUNAR_CONFIG` | Path to configuration file (overrides auto-detection) |
+| `RUNAR_NETWORK` | Default network (`mainnet` or `testnet`) |
+| `RUNAR_KEY` | WIF private key for deployment (alternative to `--key`) |
+| `RUNAR_KEY_FILE` | Path to key file (alternative to `--key-file`) |
+| `RUNAR_VERBOSE` | Set to `1` to enable verbose output globally |
+| `RUNAR_TEST_TIMEOUT` | Override test timeout in milliseconds |
+| `RUNAR_TEST_TRACE` | Set to `1` to enable script tracing in tests |
+| `RUNAR_FUZZ_SEED` | Seed for deterministic fuzz runs |

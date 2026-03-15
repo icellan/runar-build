@@ -1,0 +1,368 @@
+---
+title: "Contract Decorators & Types"
+description: "TypeScript decorators and type system."
+section: "api-reference"
+order: 30
+lang: "en"
+---
+
+Runar uses TypeScript decorators and a specialized type system to annotate contract classes and methods. This page is a complete reference for every decorator, on-chain primitive type, and composite type available in the `runar-lang` package.
+
+## Decorators
+
+### @contract
+
+Marks a class as a Runar smart contract. This is the top-level decorator that tells the compiler to process the class as a contract.
+
+```typescript
+import { SmartContract } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  // ...
+}
+```
+
+In Runar, extending `SmartContract` or `StatefulSmartContract` implicitly applies the `@contract` decorator. You do not need to use it explicitly unless you are using a custom base class.
+
+### @method
+
+Marks a method as a public contract method (a spending condition). Public methods define the conditions under which a UTXO can be spent. They must return `void` and use `assert()` to enforce conditions.
+
+```typescript
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Ripemd160;
+
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+```
+
+The `public` keyword in TypeScript serves as the `@method` decorator. All public methods on a contract class are compiled to spending conditions. Private and protected methods are treated as helper functions and inlined by the compiler.
+
+### @state
+
+Marks a field as mutable contract state. State fields are serialized and embedded in the locking script. They can be updated across transactions in stateful contracts.
+
+```typescript
+import { StatefulSmartContract, state } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  @state count: bigint;
+  @state owner: PubKey;
+
+  // ...
+}
+```
+
+**Rules for `@state` fields:**
+
+- Only available on classes extending `StatefulSmartContract`
+- Must use on-chain types (`bigint`, `boolean`, `PubKey`, `ByteString`, etc.)
+- Updated via direct assignment in public methods
+- Changes are enforced on-chain through the covenant mechanism
+
+### @prop
+
+Marks a field as an immutable contract property. Properties are baked into the locking script at deployment time and cannot change.
+
+```typescript
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Ripemd160;
+
+  constructor(pubKeyHash: Ripemd160) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+}
+```
+
+In Runar, `readonly` fields implicitly have the `@prop` decorator. They are set once in the constructor and embedded as constants in the compiled script.
+
+## On-Chain Primitive Types
+
+These types map directly to Bitcoin Script data representations. All on-chain values in Runar must use these types -- JavaScript/TypeScript native types like `number` and `string` are not allowed in contract code.
+
+### bigint
+
+Arbitrary-precision integer. The primary numeric type in Runar contracts.
+
+```typescript
+const amount: bigint = 50000n;
+const negative: bigint = -1n;
+const zero: bigint = 0n;
+```
+
+**Script representation:** Minimally-encoded signed little-endian integer.
+
+**Operations:** `+`, `-`, `*`, `/`, `%` (modulo), comparison operators (`<`, `>`, `<=`, `>=`, `===`).
+
+**Note:** Division is integer division (truncates toward zero). There are no floating-point numbers in Bitcoin Script.
+
+### boolean
+
+True or false.
+
+```typescript
+const isValid: boolean = true;
+const isEmpty: boolean = false;
+```
+
+**Script representation:** `OP_TRUE` (0x01) or `OP_FALSE` (empty byte array).
+
+### ByteString
+
+A raw byte sequence, represented as a hex string in TypeScript.
+
+```typescript
+const data: ByteString = 'aabbccdd';
+const empty: ByteString = '';
+```
+
+**Operations:** Concatenation with `+`, length with `len()`, indexing with `slice()`.
+
+```typescript
+const combined: ByteString = data1 + data2;
+const length: bigint = len(data);
+const firstByte: ByteString = slice(data, 0n, 1n);
+```
+
+### PubKey
+
+A compressed secp256k1 public key (33 bytes).
+
+```typescript
+const key: PubKey = '02' + 'aa'.repeat(32);
+```
+
+**Script representation:** 33-byte push data. Always starts with `02` or `03`.
+
+### Sig
+
+A DER-encoded ECDSA signature with sighash type byte appended.
+
+```typescript
+const signature: Sig = '30' + 'aa'.repeat(35);
+```
+
+**Affine type:** Can be used exactly once. The compiler enforces this to prevent signature replay attacks.
+
+### Sha256
+
+A SHA-256 hash digest (32 bytes).
+
+```typescript
+const digest: Sha256 = sha256('aabbccdd');
+```
+
+### Ripemd160
+
+A RIPEMD-160 hash digest (20 bytes).
+
+```typescript
+const hash: Ripemd160 = hash160(pubKey); // SHA-256 then RIPEMD-160
+```
+
+### Addr
+
+A BSV address, which is a RIPEMD-160 hash of a public key.
+
+```typescript
+const address: Addr = hash160(pubKey);
+```
+
+Functionally identical to `Ripemd160` but semantically distinct -- used to indicate a value represents an address rather than an arbitrary hash.
+
+### SigHashPreimage
+
+The serialized preimage of the transaction's sighash. Used for introspection in covenants.
+
+```typescript
+public spend(preimage: SigHashPreimage) {
+  assert(checkPreimage(preimage));
+  // Now extract fields from the verified preimage
+}
+```
+
+**Affine type:** Can be used exactly once, like `Sig`.
+
+### Point
+
+An elliptic curve point on secp256k1, used for EC operations in ZK proofs.
+
+```typescript
+const G: Point = ecMulGen(1n); // Generator point
+const P: Point = ecMul(G, secretScalar);
+```
+
+### RabinSig
+
+A Rabin signature value (arbitrary-precision integer).
+
+```typescript
+const oracleSig: RabinSig = 123456789n;
+```
+
+### RabinPubKey
+
+A Rabin public key (arbitrary-precision integer).
+
+```typescript
+const oracleKey: RabinPubKey = 987654321n;
+```
+
+## Collection and Composite Types
+
+### FixedArray<T, N>
+
+A fixed-length array of on-chain values. The length `N` must be a compile-time constant.
+
+```typescript
+// Array of 3 public keys
+const keys: FixedArray<PubKey, 3> = [key1, key2, key3];
+
+// Array of 5 bigints
+const values: FixedArray<bigint, 5> = [1n, 2n, 3n, 4n, 5n];
+```
+
+**Operations:**
+
+```typescript
+// Access by index (index must be a compile-time constant or bigint)
+const first: PubKey = keys[0];
+
+// Length (compile-time constant)
+const len: number = 3; // TypeScript-level, not on-chain
+
+// Iteration is unrolled at compile time
+for (let i = 0; i < 3; i++) {
+  assert(checkSig(sigs[i], keys[i]));
+}
+```
+
+**Note:** The length `N` must be known at compile time. Variable-length arrays are not supported because Bitcoin Script has no looping constructs. The compiler unrolls all array operations into sequential opcodes.
+
+## Constants
+
+### Elliptic Curve Constants
+
+```typescript
+import { EC_P, EC_N, EC_G } from 'runar-lang';
+
+// EC_P: The prime modulus of secp256k1
+// 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+const p: bigint = EC_P;
+
+// EC_N: The order of the generator point
+// 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+const n: bigint = EC_N;
+
+// EC_G: The generator point
+const G: Point = EC_G;
+```
+
+### SigHash Flags
+
+```typescript
+import { SigHash } from 'runar-lang';
+
+SigHash.ALL          // 0x01 -- Sign all inputs and outputs
+SigHash.NONE         // 0x02 -- Sign all inputs, no outputs
+SigHash.SINGLE       // 0x03 -- Sign all inputs, only the matching output
+SigHash.FORKID       // 0x40 -- BSV fork ID flag (always set on BSV)
+SigHash.ANYONECANPAY // 0x80 -- Sign only the current input
+```
+
+These flags are combined with bitwise OR:
+
+```typescript
+// Most common: sign everything with BSV fork ID
+const sigType = SigHash.ALL | SigHash.FORKID;
+
+// Sign all inputs, only matching output, anyone can add inputs
+const sigType = SigHash.SINGLE | SigHash.FORKID | SigHash.ANYONECANPAY;
+```
+
+## Built-In Functions
+
+### Hashing
+
+| Function | Description | Output Type |
+|----------|-------------|-------------|
+| `sha256(data)` | SHA-256 hash | `Sha256` |
+| `hash256(data)` | Double SHA-256 (sha256(sha256(data))) | `Sha256` |
+| `hash160(data)` | SHA-256 then RIPEMD-160 | `Ripemd160` |
+| `ripemd160(data)` | RIPEMD-160 hash | `Ripemd160` |
+
+### Signature Verification
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `checkSig(sig, pubKey)` | Verify ECDSA signature | `boolean` |
+| `checkMultiSig(sigs, pubKeys)` | Verify M-of-N signatures | `boolean` |
+| `verifyRabinSig(msg, sig, pubKey, padding)` | Verify Rabin signature | `boolean` |
+
+### Preimage Introspection
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `checkPreimage(preimage)` | Verify preimage authenticity | `boolean` |
+| `extractOutputHash(preimage)` | Get hashOutputs | `Sha256` |
+| `extractAmount(preimage)` | Get UTXO value | `bigint` |
+| `extractLocktime(preimage)` | Get nLockTime | `bigint` |
+| `extractOutpoint(preimage)` | Get input outpoint | `ByteString` |
+| `extractHashPrevouts(preimage)` | Get hashPrevouts | `Sha256` |
+| `extractSequence(preimage)` | Get input sequence | `bigint` |
+
+### Elliptic Curve Operations
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `ecAdd(p1, p2)` | EC point addition | `Point` |
+| `ecMul(point, scalar)` | EC point multiplication | `Point` |
+| `ecMulGen(scalar)` | Multiply generator G by scalar | `Point` |
+| `ecNegate(point)` | Negate an EC point | `Point` |
+| `ecOnCurve(point)` | Check if point is on secp256k1 | `boolean` |
+| `ecModReduce(value)` | Reduce modulo curve order N | `bigint` |
+
+### Utility Functions
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `assert(condition)` | Abort script if false | `void` |
+| `len(data)` | Byte length of a ByteString | `bigint` |
+| `slice(data, start, end)` | Extract substring | `ByteString` |
+| `pack(value)` | Encode bigint as ByteString | `ByteString` |
+| `unpack(data)` | Decode ByteString as bigint | `bigint` |
+| `buildOutput(script, amount)` | Build a transaction output | `ByteString` |
+| `buildP2PKHScript(addr)` | Build a P2PKH locking script | `ByteString` |
+
+## Custom Type Definitions
+
+You can define type aliases for readability:
+
+```typescript
+type TokenAmount = bigint;
+type OracleMessage = ByteString;
+type VoterSet = FixedArray<PubKey, 5>;
+```
+
+Custom types are purely cosmetic at the TypeScript level -- they compile to their underlying on-chain type. They do not create new Bitcoin Script representations.
+
+Struct-like composite types can be modeled using multiple state fields or constructor parameters:
+
+```typescript
+class Escrow extends SmartContract {
+  // Model "Parties" as individual fields
+  readonly buyer: PubKey;
+  readonly seller: PubKey;
+  readonly arbiter: PubKey;
+  readonly amount: bigint;
+  readonly deadline: bigint;
+
+  // ...
+}
+```
+
+There is no on-chain struct type. Each field is independently encoded and pushed onto the stack.

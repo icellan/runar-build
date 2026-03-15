@@ -1,0 +1,286 @@
+---
+title: "The Test Runner"
+description: "Using Runar's built-in test runner."
+section: "testing-and-debugging"
+order: 20
+lang: "en"
+---
+
+Runar ships with a purpose-built test runner that understands contract compilation, script evaluation, and transaction validation. It is built on top of [vitest](https://vitest.dev) and extends it with contract-aware capabilities -- source map integration, script-level tracing, and property-based fuzzing support.
+
+## Running Tests from the CLI
+
+The simplest way to run your test suite:
+
+```bash
+runar test
+```
+
+This discovers all `*.test.ts` files in the `tests/` directory, compiles any referenced contracts, and runs the tests. Under the hood, it invokes vitest with pre-configured transforms that handle `.runar.ts` imports.
+
+### Common Flags
+
+```bash
+# Run tests in watch mode (re-runs on file change)
+runar test --watch
+
+# Run a specific test file
+runar test tests/PriceBet.test.ts
+
+# Run tests matching a name pattern
+runar test --filter "settles to Alice"
+
+# Show verbose output with script execution traces
+runar test --verbose
+
+# Generate a coverage report
+runar test --coverage
+
+# Run tests in parallel (default) or sequentially
+runar test --sequence
+```
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | All tests passed |
+| `1`  | One or more tests failed |
+| `2`  | Configuration or compilation error |
+
+## Test Configuration Options
+
+Test behavior can be configured in your `runar.config.ts` or `vitest.config.ts`:
+
+```typescript
+// runar.config.ts
+export default {
+  test: {
+    // Directory containing test files (default: "tests")
+    dir: 'tests',
+
+    // Glob pattern for test file discovery (default: "**/*.test.ts")
+    include: '**/*.test.ts',
+
+    // Timeout per test in milliseconds (default: 30000)
+    timeout: 30000,
+
+    // Enable script execution traces in output (default: false)
+    trace: false,
+
+    // Maximum stack depth for script execution (default: 800)
+    maxStackDepth: 800,
+
+    // Enable property-based fuzzing tests (default: false)
+    fuzz: false,
+
+    // Number of fuzz iterations when fuzzing is enabled (default: 1000)
+    fuzzRuns: 1000,
+  },
+};
+```
+
+### Environment Variables
+
+You can also configure the test runner through environment variables:
+
+```bash
+# Override test timeout
+RUNAR_TEST_TIMEOUT=60000 runar test
+
+# Enable trace output without config change
+RUNAR_TEST_TRACE=1 runar test
+
+# Set the random seed for deterministic fuzz runs
+RUNAR_FUZZ_SEED=42 runar test
+```
+
+## Filtering and Selecting Tests
+
+### By File
+
+Pass one or more file paths to run specific test files:
+
+```bash
+runar test tests/PriceBet.test.ts tests/Counter.test.ts
+```
+
+### By Test Name
+
+Use `--filter` to match test names with a substring or regex:
+
+```bash
+# Substring match
+runar test --filter "settles"
+
+# Regex match
+runar test --filter "/^PriceBet.*Alice/"
+```
+
+### By Tag
+
+Tests can be tagged using vitest's built-in `describe` blocks, and filtered by tag:
+
+```typescript
+describe('PriceBet [integration]', () => {
+  // ...
+});
+```
+
+```bash
+runar test --filter "[integration]"
+```
+
+## ScriptVM: Direct Bitcoin Script Execution
+
+For low-level testing, `runar-testing` exports a `ScriptVM` that executes raw Bitcoin Script bytecode. This is useful when you need to test compiled output directly or verify script behavior without the `TestContract` abstraction:
+
+```typescript
+import { ScriptVM } from 'runar-testing';
+
+const vm = new ScriptVM();
+
+// Execute unlocking script followed by locking script
+const result = vm.execute(
+  '4830450221...', // unlocking script (hex)
+  '76a914...88ac'  // locking script (hex)
+);
+
+expect(result.success).toBe(true);
+expect(result.stack).toEqual(['01']); // OP_TRUE left on stack
+```
+
+The `ScriptVM` does **not** mock cryptographic operations -- it uses real signature verification. Use it when you need to test with actual key pairs and signatures.
+
+## RunarInterpreter: Reference Oracle
+
+The `RunarInterpreter` is a reference implementation that executes the ANF intermediate representation directly, without compiling to Bitcoin Script. It serves as a ground-truth oracle for verifying compiler correctness:
+
+```typescript
+import { RunarInterpreter } from 'runar-testing';
+
+const interpreter = new RunarInterpreter();
+const result = interpreter.execute(anfProgram, 'methodName', args);
+```
+
+You rarely use the interpreter directly in application tests. It is primarily used by the Runar project's own conformance test suite to validate that compiled script behavior matches the interpreted behavior.
+
+## Property-Based Fuzzing
+
+Runar integrates with [fast-check](https://github.com/dubzzz/fast-check) for property-based testing. The `runar-testing` package provides contract-specific generators:
+
+```typescript
+import { describe, it } from 'vitest';
+import { fc } from '@fast-check/vitest';
+import { arbContract, arbStatelessContract } from 'runar-testing';
+
+describe('PriceBet fuzz', () => {
+  it.prop([arbContract('./contracts/PriceBet.runar.ts')])(
+    'never panics on random inputs',
+    (contract) => {
+      // arbContract generates random valid initial state and method args
+      const result = contract.callRandom();
+      // Property: execution should never throw an unhandled exception.
+      // It can fail (result.success === false) but must not crash.
+      expect(result).toBeDefined();
+    }
+  );
+});
+```
+
+### Available Generators
+
+**`arbContract(sourcePath)`** -- Generates a `TestContract` with random initial state and provides a `callRandom()` method that invokes a random public method with random arguments of the correct types.
+
+**`arbStatelessContract(sourcePath)`** -- Same as `arbContract` but specialized for stateless contracts. It skips state initialization and only generates method arguments.
+
+Both generators respect the contract's type annotations to produce well-typed random values (e.g., `bigint` for numeric fields, valid-length hex strings for `PubKey`).
+
+## Differential Fuzzing
+
+Differential fuzzing compares the output of two implementations to find discrepancies. Runar uses this technique to validate that compiled Bitcoin Script produces the same results as the reference interpreter:
+
+```typescript
+import { differentialFuzz } from 'runar-testing';
+
+// Runs the same random programs through compiler+ScriptVM and RunarInterpreter,
+// comparing results. Throws on first disagreement.
+differentialFuzz('./contracts/PriceBet.runar.ts', { runs: 5000 });
+```
+
+This is primarily a compiler development tool, but contract authors can use it to build confidence that their contract compiles correctly.
+
+## Cross-Compiler Conformance
+
+Runar supports four frontend languages (TypeScript, Solidity, Move, Python). The conformance test suite verifies that the same logical contract produces identical compiled output regardless of the source language. It works by comparing SHA-256 hashes of the compiled artifact against golden files:
+
+```bash
+# Run the cross-compiler conformance suite
+runar test --conformance
+
+# Update golden files after intentional compiler changes
+runar test --conformance --update-golden
+```
+
+The golden files live in `tests/golden/` and contain the expected SHA-256 hash for each contract/compiler combination. A mismatch indicates a compiler regression or an intentional change that requires updating the golden files.
+
+## Understanding Test Output and Reports
+
+A typical test run produces output like this:
+
+```
+runar test v0.1.0
+
+Compiling 3 contracts...
+  P2PKH.runar.ts       42ms   (186 bytes)
+  PriceBet.runar.ts    118ms  (1,204 bytes)
+  Counter.runar.ts     87ms   (892 bytes)
+
+Running 8 tests in 3 files...
+
+ PASS  tests/P2PKH.test.ts (2 tests) 48ms
+ PASS  tests/PriceBet.test.ts (3 tests) 92ms
+ FAIL  tests/Counter.test.ts (3 tests) 67ms
+   x Counter > rejects decrement below zero
+     AssertionError: expected false to be true
+     Script trace:
+       OP_1 OP_SUB OP_DUP OP_0 OP_LESSTHAN OP_VERIFY
+                                              ^^^^^^^^ FAILED
+     Source: Counter.runar.ts:18 assert(this.count >= 0n)
+
+ Test Files  2 passed | 1 failed (3)
+      Tests  7 passed | 1 failed (8)
+   Duration  512ms
+```
+
+When `--verbose` or `trace: true` is enabled, failed tests include:
+- The full Bitcoin Script opcode trace
+- Stack contents at each step
+- A source map back to the original line of Runar code
+
+## Continuous Integration Setup
+
+Runar tests work in any CI environment that supports Node.js. Here is a GitHub Actions example:
+
+```yaml
+name: Test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install
+      - run: pnpm runar test --coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+```
+
+For projects using Go or Rust contracts, add the corresponding toolchain setup steps before `runar test`. The test runner automatically detects the source language and invokes the appropriate frontend compiler.

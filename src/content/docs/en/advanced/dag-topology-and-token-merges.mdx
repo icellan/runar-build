@@ -1,0 +1,237 @@
+---
+title: "DAG Topology & Token Merges"
+description: "Directed acyclic graph patterns for tokens."
+section: "advanced"
+order: 30
+lang: "en"
+---
+
+When multiple UTXOs representing tokens need to be combined or split, the resulting transaction graph forms a directed acyclic graph (DAG). Managing this topology correctly is critical for token integrity -- especially for fungible tokens where the total supply must remain constant across all splits and merges.
+
+## UTXO Graphs and DAG Structures
+
+In the UTXO model, every transaction consumes one or more inputs and produces one or more outputs. When a token contract allows splitting (one UTXO becomes two) and merging (two UTXOs become one), the transaction history forms a DAG rather than a simple chain:
+
+```
+        [Token: 100]
+           /    \
+    [Token: 60]  [Token: 40]     <-- split
+       |            |
+    [Token: 60]  [Token: 40]
+         \        /
+        [Token: 100]             <-- merge
+```
+
+Each node in the DAG is a UTXO, and each edge is a transaction. The DAG structure is inherent to how UTXO-based tokens work -- it is not an implementation choice but a consequence of the model.
+
+### Why DAG Topology Matters
+
+**Supply invariants.** At any point in time, the sum of all unspent token UTXOs must equal the total minted supply. Splits must not create tokens out of nothing, and merges must not destroy them.
+
+**Concurrent spending.** Multiple parties can hold different UTXOs of the same token and spend them independently. The DAG naturally handles concurrency without requiring global coordination.
+
+**Proof of ownership.** To verify that a token is legitimate, you can trace its DAG back to the minting transaction. Every split and merge in the path must be valid.
+
+## Token Splitting
+
+Splitting is the simpler operation: a single token UTXO is spent in a transaction that creates two or more token outputs whose values sum to the input value.
+
+```typescript
+class FungibleToken extends StatefulSmartContract {
+  @state amount: bigint;
+  @state ownerPubKey: PubKey;
+
+  public split(
+    sig: Sig,
+    preimage: SigHashPreimage,
+    splitAmount: bigint,
+    newOwner: PubKey,
+  ) {
+    assert(checkPreimage(preimage));
+    assert(checkSig(sig, this.ownerPubKey));
+
+    // Validate split amount
+    assert(splitAmount > 0n);
+    assert(splitAmount < this.amount);
+
+    const remainingAmount = this.amount - splitAmount;
+
+    // Build two outputs: one for the original owner, one for the new owner
+    // Both outputs use the same token contract script with updated state
+    const output1 = buildTokenOutput(
+      this.getScriptCode(), remainingAmount, this.ownerPubKey
+    );
+    const output2 = buildTokenOutput(
+      this.getScriptCode(), splitAmount, newOwner
+    );
+
+    // Verify the transaction creates exactly these outputs
+    assert(hash256(output1 + output2) === extractOutputHash(preimage));
+  }
+}
+```
+
+The key invariant: `splitAmount + remainingAmount === this.amount`. The contract enforces this at the script level, making it impossible to inflate the supply through splits.
+
+## Token Merging
+
+Merging is more complex because it involves two inputs (two token UTXOs) and must prove that both are being consumed in the same transaction. This is where `hashPrevouts` becomes critical.
+
+### The Anti-Inflation Problem
+
+A naive merge implementation is vulnerable to inflation: an attacker could present the same token UTXO as both inputs, effectively doubling their balance. The solution is to verify that the two inputs are *distinct* UTXOs being consumed in the *same* transaction.
+
+### Using hashPrevouts for Merge Verification
+
+The `hashPrevouts` field in the sighash preimage is a hash of all input outpoints (txid + output index) in the spending transaction. By requiring both merging UTXOs to share the same `hashPrevouts`, the contract proves they are being consumed in the same transaction. By verifying the outpoints are distinct, it proves they are different UTXOs.
+
+```typescript
+class MergeableToken extends StatefulSmartContract {
+  @state amount: bigint;
+  @state ownerPubKey: PubKey;
+
+  public merge(
+    sig: Sig,
+    preimage: SigHashPreimage,
+    otherAmount: bigint,
+    otherOutpoint: ByteString,
+    mergeIndex: bigint, // 0 or 1, which input this is
+  ) {
+    assert(checkPreimage(preimage));
+    assert(checkSig(sig, this.ownerPubKey));
+
+    // Extract this input's outpoint from the preimage
+    const thisOutpoint = extractOutpoint(preimage);
+
+    // Verify the two outpoints are different (prevents double-counting)
+    assert(thisOutpoint !== otherOutpoint);
+
+    // Verify both outpoints are part of this transaction's inputs
+    // by checking they produce the correct hashPrevouts
+    const hashPrev = extractHashPrevouts(preimage);
+    if (mergeIndex === 0n) {
+      assert(hash256(thisOutpoint + otherOutpoint) === hashPrev);
+    } else {
+      assert(hash256(otherOutpoint + thisOutpoint) === hashPrev);
+    }
+
+    // Build the merged output with combined amount
+    const mergedAmount = this.amount + otherAmount;
+    const output = buildTokenOutput(
+      this.getScriptCode(), mergedAmount, this.ownerPubKey
+    );
+    assert(hash256(output) === extractOutputHash(preimage));
+  }
+}
+```
+
+Both inputs run the same `merge` method (one as `mergeIndex = 0`, the other as `mergeIndex = 1`). Each independently verifies the transaction structure. The `hashPrevouts` check guarantees both are part of the same transaction, and the `thisOutpoint !== otherOutpoint` check prevents double-counting.
+
+## Maintaining Token Supply Invariants
+
+The fundamental invariant for a fungible token is:
+
+```
+sum(all unspent token UTXOs) === total minted supply
+```
+
+This is enforced through two mechanisms:
+
+1. **Minting** is restricted to a specific minting authority (usually a single transaction or a contract controlled by the issuer).
+
+2. **Splits and merges** are conservation operations -- the sum of outputs always equals the sum of inputs. The contract script enforces this mathematically.
+
+### Auditing Supply
+
+Because all token transactions form a publicly visible DAG, anyone can audit the total supply by:
+
+1. Starting from the minting transaction
+2. Walking the DAG forward, tracking all splits and merges
+3. Summing all unspent leaf UTXOs
+
+This audit requires no trust -- it is purely a function of the public blockchain data and the token contract's verified rules.
+
+## Token Wallet and UTXO Management
+
+The `TokenWallet` class in the Runar SDK manages the complexity of the token DAG for end users:
+
+```typescript
+import { TokenWallet, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+
+const wallet = new TokenWallet({
+  tokenId: 'abc123...', // Minting transaction ID
+  provider: new WhatsOnChainProvider('mainnet'),
+  signer: new LocalSigner(privateKey),
+});
+
+// Check balance (sum of all owned token UTXOs)
+const balance = await wallet.getBalance();
+
+// Transfer tokens (automatically splits if needed)
+await wallet.transfer(recipientPubKey, 50n);
+
+// Get all owned UTXOs
+const utxos = await wallet.getUtxos();
+```
+
+### Automatic Merging
+
+Over time, a wallet may accumulate many small token UTXOs from receiving multiple transfers. The `merge` method consolidates them:
+
+```typescript
+// Merge all owned UTXOs into a single UTXO
+await wallet.merge();
+
+// Merge only UTXOs below a threshold
+await wallet.merge({ minAmount: 100n });
+```
+
+Automatic merging is important for two reasons:
+
+1. **Fee efficiency.** Many small UTXOs require a separate input per UTXO when spending, increasing transaction size and fees.
+
+2. **DAG depth.** Deep DAGs with many small branches are slower to audit. Merging compacts the DAG.
+
+## Handling Concurrent Spends and Race Conditions
+
+When multiple parties hold UTXOs of the same token, they can spend them concurrently without conflict -- each UTXO is independent. However, race conditions can occur when:
+
+**Two parties try to merge overlapping UTXO sets.** If Alice and Bob both try to merge a set that includes the same UTXO, one transaction will succeed and the other will be rejected as a double-spend.
+
+**A transfer and a merge target the same UTXO.** The first transaction to confirm wins; the other becomes invalid.
+
+The `TokenWallet` handles these cases by:
+
+1. Locking UTXOs that are part of pending transactions
+2. Refreshing the UTXO set before constructing new transactions
+3. Retrying failed transactions with updated inputs
+
+```typescript
+// Safe transfer with automatic retry on UTXO conflict
+const result = await wallet.transfer(recipient, amount, {
+  retries: 3,
+  refreshBeforeRetry: true,
+});
+```
+
+## Optimizing DAG Depth and Transaction Throughput
+
+### DAG Depth
+
+Every split increases the depth of the DAG by one. Very deep DAGs (thousands of levels) can make auditing slow because verifiers must walk the entire path back to the minting transaction.
+
+**Mitigation strategies:**
+
+- **Periodic consolidation.** Merge small UTXOs back together regularly. This reduces depth by collapsing branches.
+- **Checkpoint transactions.** The token issuer can periodically create a "checkpoint" transaction that merges all known UTXOs, resetting the DAG depth.
+- **SPV proofs.** Instead of walking the full DAG, provide Merkle proofs that a token UTXO descends from a known-valid checkpoint.
+
+### Transaction Throughput
+
+Each UTXO can be spent independently, so token throughput scales with the number of UTXOs. More UTXOs means more concurrent transactions -- but also more UTXO management overhead.
+
+**Scaling strategies:**
+
+- **Pre-split for distribution.** Before a large distribution event (e.g., airdrop), pre-split the token supply into many UTXOs of the expected denomination.
+- **Batched merges.** Instead of merging two UTXOs at a time, batch-merge multiple UTXOs in a single transaction (up to the transaction size limit).
+- **Off-chain coordination.** Use payment channels or off-chain state for high-frequency transfers, settling to on-chain token UTXOs periodically.

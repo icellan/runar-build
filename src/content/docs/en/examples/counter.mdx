@@ -1,0 +1,213 @@
+---
+title: "Counter"
+description: "A simple stateful counter contract."
+section: "examples"
+order: 20
+lang: "en"
+---
+
+The counter contract is the simplest example of a stateful contract on BSV. It maintains a single integer in the UTXO state and supports increment and decrement operations. Each operation spends the current UTXO and creates a new one with the updated count, enforced by the contract's covenant.
+
+This example is the "Hello World" of `StatefulSmartContract` and demonstrates the fundamental mechanics of state continuation on BSV.
+
+## Contract Source
+
+```typescript
+import { StatefulSmartContract, assert } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor() {
+    super();
+    this.count = 0n;
+  }
+
+  public increment() {
+    this.count = this.count + 1n;
+    assert(true);
+  }
+
+  public decrement() {
+    assert(this.count > 0n);
+    this.count = this.count - 1n;
+    assert(true);
+  }
+}
+
+export { Counter };
+```
+
+## Annotations
+
+### The Import
+
+```typescript
+import { StatefulSmartContract, assert } from 'runar-lang';
+```
+
+Only two imports are needed: the base class and the assertion function. This contract does not use cryptographic operations or preimage introspection -- it is a pure state machine.
+
+### Class Declaration
+
+```typescript
+class Counter extends StatefulSmartContract {
+```
+
+Extending `StatefulSmartContract` tells the compiler this contract maintains mutable state across transactions. The compiler will automatically inject OP_PUSH_TX preimage verification and state continuation logic into the compiled script.
+
+### State Definition
+
+```typescript
+count: bigint;
+```
+
+A single mutable property. Because it is not `readonly`, its value can change between transactions. The current value of `count` is serialized into the UTXO's locking script. When the UTXO is spent and a new one is created, the new locking script contains the updated value.
+
+All numeric values in Runar contracts use `bigint`. The JavaScript `number` type is not allowed because it cannot represent arbitrary-precision integers and introduces floating-point issues that would be dangerous in financial contracts.
+
+### Constructor
+
+```typescript
+constructor() {
+  super();
+  this.count = 0n;
+}
+```
+
+The constructor initializes the counter to zero. The `super()` call is required for all Runar contracts. The `0n` literal is a `bigint` zero -- the `n` suffix is required.
+
+When the contract is deployed, the initial UTXO's locking script encodes `count = 0`.
+
+### The `increment` Method
+
+```typescript
+public increment() {
+  this.count = this.count + 1n;
+  assert(true);
+}
+```
+
+This public method adds 1 to the counter. The `assert(true)` at the end is required because every public method must contain at least one `assert()` call. In this case, the assertion always passes -- the method has no preconditions beyond the implicit covenant enforcement that the compiler injects.
+
+When `increment` is called:
+
+1. The current UTXO (with `count = N`) is spent.
+2. The compiler-injected covenant verifies that the spending transaction creates a new UTXO with `count = N + 1`.
+3. If the covenant check passes, the transaction is valid.
+
+The caller cannot lie about the state update. The covenant ensures the new UTXO contains exactly `count + 1`, not any other value.
+
+### The `decrement` Method
+
+```typescript
+public decrement() {
+  assert(this.count > 0n);
+  this.count = this.count - 1n;
+  assert(true);
+}
+```
+
+Decrement has a precondition: `this.count > 0n`. You cannot decrement below zero. If someone tries to call `decrement` when the count is already 0, the assertion fails and the transaction is rejected by the network.
+
+This demonstrates how assertions serve as both validation logic and access control. The contract enforces its own invariants on-chain -- no external validator is needed.
+
+## How State Continuation Works
+
+Behind the scenes, the Runar compiler transforms the Counter contract into Bitcoin Script that uses the OP_PUSH_TX technique. Here is what happens at the script level when `increment` is called:
+
+1. The unlocking script provides the transaction preimage as input.
+2. The locking script verifies the preimage matches the current transaction (`checkPreimage`).
+3. The script reads the current `count` from its own locking script.
+4. The script computes `count + 1`.
+5. The script constructs the expected output locking script with the new count value.
+6. The script extracts the actual output hash from the preimage and compares it to the hash of the expected output.
+7. If they match, the script succeeds.
+
+All of this is generated automatically by the Runar compiler. You write `this.count = this.count + 1n` and the compiler handles the rest.
+
+## Test Code
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+
+describe('Counter', () => {
+  it('should start at zero', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Counter.runar.ts',
+      'Counter'
+    );
+    const instance = contract.create();
+    expect(instance.state.count).toBe(0n);
+  });
+
+  it('should increment the counter', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Counter.runar.ts',
+      'Counter'
+    );
+    const instance = contract.create();
+
+    const result = await instance.call('increment', {});
+    expect(result.success).toBe(true);
+  });
+
+  it('should decrement the counter', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Counter.runar.ts',
+      'Counter'
+    );
+    const instance = contract.create();
+
+    // Increment first to get above zero
+    await instance.call('increment', {});
+
+    const result = await instance.call('decrement', {});
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject decrement at zero', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Counter.runar.ts',
+      'Counter'
+    );
+    const instance = contract.create();
+
+    // Count starts at 0, decrement should fail
+    const result = await instance.call('decrement', {});
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+## Running the Example
+
+```bash
+# Compile
+runar compile contracts/Counter.runar.ts --output ./artifacts --asm
+
+# Test
+runar test
+
+# Deploy
+runar deploy ./artifacts/Counter.json \
+  --network testnet \
+  --key <your-WIF-key> \
+  --satoshis 10000
+
+# Increment the deployed counter
+runar call <txid>:0 increment \
+  --artifact ./artifacts/Counter.json \
+  --network testnet \
+  --key <your-WIF-key>
+```
+
+Each call to `increment` or `decrement` creates a new transaction, spending the old UTXO and creating a new one. You can follow the chain of transactions on a block explorer to see the counter's value evolve over time.
+
+## Key Takeaways
+
+- `StatefulSmartContract` enables mutable state carried forward across transactions.
+- State is serialized into the UTXO's locking script and enforced by a compiler-generated covenant.
+- Assertions serve as both validation logic and preconditions for state transitions.
+- The compiler handles all the OP_PUSH_TX mechanics -- you write simple assignments and the rest is automatic.

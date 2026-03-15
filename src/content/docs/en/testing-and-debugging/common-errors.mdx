@@ -1,0 +1,265 @@
+---
+title: "Common Errors"
+description: "Frequently encountered errors and solutions."
+section: "testing-and-debugging"
+order: 40
+lang: "en"
+---
+
+This page catalogs the most common errors you may encounter when writing, compiling, deploying, or calling Runar contracts, along with explanations and solutions. Errors are grouped by the phase in which they occur.
+
+## Compilation Errors
+
+### Disallowed Language Feature
+
+```
+Error: Disallowed feature: for-of loops are not supported.
+  --> Counter.runar.ts:15:4
+```
+
+**Cause:** Runar compiles to Bitcoin Script, which has no loops or unbounded iteration. Features like `for`, `while`, `for-of`, and recursion are not permitted because Bitcoin Script must terminate in bounded time.
+
+**Solution:** Replace loops with fixed-iteration patterns, array operations on `FixedArray`, or restructure your logic to avoid iteration. If you need to process N items, use a `FixedArray<T, N>` with a known compile-time length.
+
+### Type Mismatch
+
+```
+Error: Type mismatch: expected 'bigint', found 'number'.
+  --> PriceBet.runar.ts:18:24
+```
+
+**Cause:** Runar's on-chain type system is strict. All numeric values must be `bigint`, not JavaScript `number`. Similarly, keys must be typed as `PubKey`, signatures as `Sig`, and so on.
+
+**Solution:** Use `bigint` literals (e.g., `50000n` instead of `50000`) and ensure all variables and parameters are annotated with the correct on-chain type.
+
+### Affine Type Violation
+
+```
+Error: Affine type 'Sig' used more than once.
+  --> MultiSig.runar.ts:22:8
+  Note: first use at line 18, second use at line 22.
+```
+
+**Cause:** `Sig` and `SigHashPreimage` are affine types in Runar -- they can be consumed (used) exactly once. This is a deliberate security constraint that prevents signature replay attacks. If you reference a `Sig` variable in two different expressions, the compiler rejects it.
+
+**Solution:** If you need to check a signature in multiple branches, restructure your logic so each branch uses the signature independently. For example, use a single `checkSig` call and store the boolean result:
+
+```typescript
+// Wrong: uses sig twice
+assert(checkSig(sig, pubKeyA));
+assert(checkSig(sig, pubKeyB)); // Error: sig already consumed
+
+// Right: check once, use the result
+const validA = checkSig(sig, pubKeyA);
+assert(validA);
+```
+
+### Unsupported Method Return Type
+
+```
+Error: Public methods must return void.
+  --> Calculator.runar.ts:10:3
+```
+
+**Cause:** Public contract methods (`public` methods) are spending conditions. They either succeed (all asserts pass) or fail. They do not return values. Only the `@method` decorator on non-public helper methods can return values, and those values must be on-chain types.
+
+**Solution:** Remove the return type and return statement from public methods. Use `assert()` to enforce conditions instead.
+
+### Missing Constructor Super Call
+
+```
+Error: Constructor must call super() with all readonly properties.
+  --> Escrow.runar.ts:8:3
+```
+
+**Cause:** The `super()` call in the constructor registers constructor parameters with the compiler so they can be embedded in the locking script. Every `readonly` property must be passed to `super()`.
+
+**Solution:** Ensure `super()` receives all `readonly` properties in the same order they are declared.
+
+## Runtime Errors
+
+### Assert Failure
+
+```
+Script execution failed: OP_VERIFY at offset 47
+Source: PriceBet.runar.ts:24 assert(verifyRabinSig(...))
+```
+
+**Cause:** An `assert()` call evaluated to `false` during script execution. This is the most common runtime error -- it means a spending condition was not met.
+
+**Solution:** Check the inputs you are passing to the contract method. Use `--verbose` test output or the script debugger to inspect the stack at the point of failure. Common causes include incorrect signatures, wrong public keys, or state values that do not match expectations.
+
+### Stack Overflow
+
+```
+Error: Stack overflow -- depth 801 exceeds maximum of 800
+```
+
+**Cause:** Bitcoin Script has a maximum stack depth of 800 elements. Complex contracts with many intermediate values or deeply nested expressions can exceed this limit.
+
+**Solution:** Simplify your contract logic. Break large expressions into smaller steps that reuse stack slots. Reduce the number of state fields or method parameters. Consider splitting the contract into multiple smaller contracts that interact through transactions.
+
+### Stack Underflow
+
+```
+Error: Stack underflow -- attempted to pop from empty stack at offset 34
+```
+
+**Cause:** The script tried to consume a value that was not on the stack. This typically indicates a mismatch between the unlocking script (method arguments) and what the locking script expects.
+
+**Solution:** Verify that you are passing all required arguments to the contract method in the correct order. If you are constructing transactions manually, ensure the unlocking script pushes the right number of values.
+
+## Deployment Errors
+
+### Insufficient Funds
+
+```
+Error: Insufficient funds. Required: 15000 satoshis, available: 8000 satoshis.
+```
+
+**Cause:** The wallet funding the deployment transaction does not have enough satoshis to cover the contract output amount plus the transaction fee.
+
+**Solution:** Fund your wallet with more testnet/mainnet coins. You can estimate the required amount with:
+
+```bash
+runar deploy ./artifacts/MyContract.json --network testnet --dry-run
+```
+
+The `--dry-run` flag prints the estimated cost without broadcasting.
+
+### Invalid Network
+
+```
+Error: Invalid network 'mainnet'. Artifact was compiled for 'testnet'.
+```
+
+**Cause:** The compiled artifact includes a network binding. Deploying to a different network than the one specified at compile time is rejected as a safety measure.
+
+**Solution:** Recompile for the target network:
+
+```bash
+runar compile contracts/MyContract.runar.ts --network mainnet --output ./artifacts
+```
+
+### Transaction Rejected by Network
+
+```
+Error: Transaction rejected: mandatory-script-verify-flag-failed (Script evaluated without error but finished with a false/empty top stack element)
+```
+
+**Cause:** The transaction was broadcast but rejected by miners. The spending condition (locking script) was not satisfied by the provided unlocking script. This can happen when:
+- The unlocking arguments are incorrect
+- The contract was deployed with different constructor parameters than expected
+- A covenant constraint was not met in the output transaction
+
+**Solution:** Use `runar verify` to confirm the on-chain script matches your artifact. Then test the exact arguments locally with `TestContract` before broadcasting.
+
+### Broadcast Timeout
+
+```
+Error: Transaction broadcast timed out after 30s. The transaction may still be pending.
+```
+
+**Cause:** The network did not confirm receipt of the transaction within the timeout window. This does not necessarily mean the transaction failed -- it may still be propagating.
+
+**Solution:** Check the transaction status using the TxID:
+
+```bash
+runar verify <txid> --network testnet --status-only
+```
+
+If the transaction was not accepted, inspect the error and retry.
+
+## Transaction Rejection Errors
+
+### Non-Final Transaction
+
+```
+Error: Transaction is not final. nLockTime: 700000, current block: 699999.
+```
+
+**Cause:** The transaction uses `nLockTime` and the specified block height has not been reached yet.
+
+**Solution:** Wait for the required block height, or adjust the locktime in your contract logic.
+
+### Dust Output
+
+```
+Error: Output amount 100 satoshis is below dust threshold (546 satoshis).
+```
+
+**Cause:** BSV nodes reject transactions with outputs below the dust threshold (546 satoshis for standard outputs). This often happens with token contracts that try to create very small outputs.
+
+**Solution:** Ensure all outputs in your transactions are at least 546 satoshis. The SDK's `estimateDeployFee` and `selectUtxos` utilities account for dust thresholds automatically.
+
+### Double Spend
+
+```
+Error: Transaction rejected: txn-mempool-conflict. Input already spent in mempool.
+```
+
+**Cause:** The UTXO you are trying to spend has already been spent by another transaction that is in the mempool or confirmed.
+
+**Solution:** Refresh your UTXO set and select a different input. If you are managing state transitions on a stateful contract, ensure you are using the latest UTXO:
+
+```typescript
+const contract = await RunarContract.fromTxId(latestTxId, provider);
+```
+
+## Environment and Configuration Issues
+
+### Missing Compiler Binary
+
+```
+Error: runar-compiler not found. Ensure @aspect-build/runar-compiler is installed.
+```
+
+**Cause:** The compiler binary is not in your PATH or not installed as a project dependency.
+
+**Solution:** Reinstall dependencies:
+
+```bash
+pnpm install
+```
+
+Or install globally:
+
+```bash
+pnpm add -g runar-cli
+```
+
+### Invalid Configuration File
+
+```
+Error: Invalid runar.config.ts: unknown option 'target'.
+```
+
+**Cause:** The configuration file contains an unrecognized option. This often happens after upgrading Runar to a new version where options have been renamed.
+
+**Solution:** Check the [CLI Reference](/docs/en/api-reference/cli-reference) for the current set of valid configuration options.
+
+### Node.js Version Mismatch
+
+```
+Error: Runar requires Node.js >= 20. Current version: 18.17.0.
+```
+
+**Cause:** Runar uses modern JavaScript features (like top-level await, structured clone) that require Node.js 20 or later.
+
+**Solution:** Upgrade Node.js to version 20 or later. Use a version manager like `nvm` or `fnm` to switch versions:
+
+```bash
+nvm install 20
+nvm use 20
+```
+
+## Debugging Strategies by Error Type
+
+| Error Type | First Step | Tool to Use |
+|-----------|-----------|-------------|
+| Compilation error | Read the compiler message and fix the source | `runar compile --verbose` |
+| Assert failure | Inspect which assert failed using source map | `runar test --verbose` or `runar debug` |
+| Stack overflow | Simplify contract logic | Script debugger with `stack` command |
+| Deployment failure | Check wallet balance and network config | `runar deploy --dry-run` |
+| Transaction rejection | Verify artifact matches on-chain | `runar verify` |
+| Configuration issue | Check versions and config file | `runar --version`, check `runar.config.ts` |

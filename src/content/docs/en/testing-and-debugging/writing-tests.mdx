@@ -1,0 +1,296 @@
+---
+title: "Writing Tests"
+description: "How to test Runar contracts."
+section: "testing-and-debugging"
+order: 10
+lang: "en"
+---
+
+Testing is a critical part of smart contract development. Runar provides a testing framework that lets you verify contract behavior locally before deploying to the BSV network. The core testing primitive is `TestContract` from the `runar-testing` package, which compiles and executes contracts in an isolated local environment with no network dependencies.
+
+## Setting Up Your Test Environment
+
+Runar projects scaffolded with `runar init` come pre-configured with [vitest](https://vitest.dev) and the `runar-testing` package. If you are adding tests to an existing project, install the dependencies:
+
+```bash
+pnpm add -D vitest runar-testing
+```
+
+Create a `tests/` directory at the project root. Test files follow the naming convention `*.test.ts`. A minimal `vitest.config.ts` is included in scaffolded projects, but no special configuration is required -- `runar-testing` works with vitest out of the box.
+
+## The TestContract API
+
+`TestContract` is the primary testing utility. It compiles a contract from source, instantiates it with initial state, and lets you call its public methods in a simulated execution environment.
+
+### Creating a TestContract
+
+There are two ways to create a test contract:
+
+```typescript
+import { TestContract } from 'runar-testing';
+import { readFileSync } from 'node:fs';
+
+// Option 1: From a source string
+const source = readFileSync('./contracts/PriceBet.runar.ts', 'utf8');
+const contract = TestContract.fromSource(source, {
+  alicePubKey: '02' + 'aa'.repeat(32),
+  bobPubKey: '02' + 'bb'.repeat(32),
+  oraclePubKey: 12345n,
+  strikePrice: 50000n,
+});
+
+// Option 2: From a file path (reads and compiles automatically)
+const contract2 = TestContract.fromFile(
+  './contracts/PriceBet.runar.ts',
+  { alicePubKey: '02' + 'aa'.repeat(32), bobPubKey: '02' + 'bb'.repeat(32),
+    oraclePubKey: 12345n, strikePrice: 50000n }
+);
+```
+
+**`TestContract.fromSource(source, initialState?, fileHint?)`** -- Compiles the given source string. The optional `initialState` object sets constructor parameters or `@state` fields. The optional `fileHint` string is used in error messages to identify the source file.
+
+**`TestContract.fromFile(path, initialState?)`** -- Reads the file at `path` and compiles it. Equivalent to calling `fromSource` with `readFileSync` and passing the path as `fileHint`.
+
+### Calling Contract Methods
+
+Use `contract.call(methodName, namedArgs)` to invoke a public method:
+
+```typescript
+const result = contract.call('settle', {
+  price: 60000n,
+  rabinSig: 99999n,
+  padding: 'aabbccdd',
+  aliceSig: '30' + 'aa'.repeat(35),
+  bobSig: '30' + 'bb'.repeat(35),
+});
+```
+
+The return value is an object with the following shape:
+
+```typescript
+{
+  success: boolean;    // true if all asserts passed and script executed cleanly
+  error?: string;      // human-readable error message if success is false
+  outputs?: any[];     // values left on the stack after execution
+}
+```
+
+### Reading and Modifying State
+
+After calling a method, inspect the contract's state with the `state` getter:
+
+```typescript
+const counter = TestContract.fromSource(counterSource, { count: 0n });
+counter.call('increment', {});
+expect(counter.state.count).toBe(1n);
+```
+
+For stateful contracts, the state updates in place after each successful `call`. This lets you test sequences of state transitions by chaining multiple calls.
+
+### Mocking Transaction Preimage Fields
+
+Contracts that use `SigHashPreimage` for introspection (covenants, recursive contracts) need specific transaction context. Use `setMockPreimage` to override preimage fields:
+
+```typescript
+contract.setMockPreimage({
+  locktime: 700000n,
+  amount: 50000n,
+  version: 2n,
+  sequence: 0xfffffffen,
+});
+```
+
+All fields are optional -- only the fields you provide will be overridden. The rest use sensible defaults (version 2, max sequence, zero locktime, 1000 satoshis).
+
+## Writing Unit Tests for Contract Methods
+
+A well-structured test file covers the happy path, expected failures, and edge cases. Here is a complete example testing a `PriceBet` contract:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { readFileSync } from 'node:fs';
+
+const source = readFileSync('./contracts/PriceBet.runar.ts', 'utf8');
+
+function makeBet(overrides = {}) {
+  return TestContract.fromSource(source, {
+    alicePubKey: '02' + 'aa'.repeat(32),
+    bobPubKey: '02' + 'bb'.repeat(32),
+    oraclePubKey: 12345n,
+    strikePrice: 50000n,
+    ...overrides,
+  });
+}
+
+describe('PriceBet', () => {
+  it('settles to Alice when price exceeds strike', () => {
+    const bet = makeBet();
+    const result = bet.call('settle', {
+      price: 60000n,
+      rabinSig: 99999n,
+      padding: 'aabbccdd',
+      aliceSig: '30' + 'aa'.repeat(35),
+      bobSig: '30' + 'bb'.repeat(35),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('settles to Bob when price is below strike', () => {
+    const bet = makeBet();
+    const result = bet.call('settle', {
+      price: 40000n,
+      rabinSig: 99999n,
+      padding: 'aabbccdd',
+      aliceSig: '30' + 'aa'.repeat(35),
+      bobSig: '30' + 'bb'.repeat(35),
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('fails when oracle signature is invalid', () => {
+    const bet = makeBet();
+    const result = bet.call('settle', {
+      price: 60000n,
+      rabinSig: 0n,
+      padding: 'aabbccdd',
+      aliceSig: '30' + 'aa'.repeat(35),
+      bobSig: '30' + 'bb'.repeat(35),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('assert');
+  });
+});
+```
+
+### How Crypto Mocking Works
+
+In the test environment, cryptographic signature verification operations (`checkSig`, `checkMultiSig`, Rabin signature checks) are **mocked to return true**. This means you do not need real private keys or valid signatures in unit tests -- any byte string of the correct format will be accepted.
+
+Hashing operations (`sha256`, `hash256`, `hash160`, `ripemd160`) use **real implementations**. This lets you test hash-dependent logic (address derivation, commitment schemes) with accurate results.
+
+If you need to test that a contract rejects an invalid signature, use the `ScriptVM` directly with mocking disabled (see [Debugging Compiled Script](/docs/en/testing-and-debugging/debugging-script)).
+
+## Testing State Transitions
+
+For stateful contracts (those extending `StatefulSmartContract`), test the full lifecycle of state changes:
+
+```typescript
+describe('Counter', () => {
+  it('increments through multiple calls', () => {
+    const counter = TestContract.fromSource(counterSource, { count: 0n });
+
+    counter.call('increment', {});
+    expect(counter.state.count).toBe(1n);
+
+    counter.call('increment', {});
+    expect(counter.state.count).toBe(2n);
+
+    counter.call('increment', {});
+    expect(counter.state.count).toBe(3n);
+  });
+
+  it('rejects decrement below zero', () => {
+    const counter = TestContract.fromSource(counterSource, { count: 0n });
+    const result = counter.call('decrement', {});
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+## Testing in Go
+
+Go contracts use the standard `testing` package. The `runar` Go module provides `Assert()` and `CompileCheck()` helpers:
+
+```go
+package mycontract
+
+import (
+    "testing"
+    "runar"
+)
+
+func TestP2PKH_Unlock(t *testing.T) {
+    contract := runar.NewTestContract("P2PKH", runar.State{
+        "pubKeyHash": "ab".repeat(20),
+    })
+
+    result := contract.Call("unlock", runar.Args{
+        "sig":    runar.MockSig(),
+        "pubKey": runar.MockPubKey(),
+    })
+
+    runar.Assert(result.Success, "unlock should succeed")
+}
+
+func TestP2PKH_CompileCheck(t *testing.T) {
+    err := runar.CompileCheck("./P2PKH.runar.go")
+    if err != nil {
+        t.Fatalf("compilation failed: %v", err)
+    }
+}
+```
+
+`runar.Assert()` panics on failure with a descriptive message, which Go's test runner catches and reports as a test failure.
+
+## Testing in Rust
+
+Rust contracts use the standard `#[test]` attribute and `#[should_panic]` for expected failures:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use runar::{TestContract, compile_check, mock_sig, mock_pubkey};
+
+    #[test]
+    fn test_p2pkh_unlock() {
+        let contract = TestContract::from_file(
+            "./P2PKH.runar.rs",
+            vec![("pubKeyHash", "ab".repeat(20))],
+        );
+        let result = contract.call("unlock", vec![
+            ("sig", mock_sig()),
+            ("pubKey", mock_pubkey()),
+        ]);
+        assert!(result.success);
+    }
+
+    #[test]
+    #[should_panic(expected = "assert failed")]
+    fn test_p2pkh_wrong_key() {
+        let contract = TestContract::from_file(
+            "./P2PKH.runar.rs",
+            vec![("pubKeyHash", "ab".repeat(20))],
+        );
+        let result = contract.call("unlock", vec![
+            ("sig", mock_sig()),
+            ("pubKey", mock_pubkey_different()),
+        ]);
+        result.expect_success();
+    }
+
+    #[test]
+    fn test_compile_check() {
+        compile_check("./P2PKH.runar.rs").unwrap();
+    }
+}
+```
+
+## Assertion Helpers for Script Evaluation
+
+Beyond the `result.success` boolean, `runar-testing` provides helpers for common assertion patterns:
+
+```typescript
+import { expectSuccess, expectFailure, expectOutput } from 'runar-testing';
+
+// Assert the call succeeds
+expectSuccess(contract.call('unlock', args));
+
+// Assert the call fails with a specific error
+expectFailure(contract.call('unlock', badArgs), 'checkSig');
+
+// Assert specific stack output values
+expectOutput(contract.call('compute', args), [42n, true]);
+```
+
+These helpers produce clearer error messages than raw `expect` calls, including the full script execution trace when a test fails.

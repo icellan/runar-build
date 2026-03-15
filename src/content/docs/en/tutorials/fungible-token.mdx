@@ -1,0 +1,378 @@
+---
+title: "Fungible Token"
+description: "Create a fungible token."
+section: "tutorials"
+order: 20
+lang: "en"
+---
+
+In this tutorial you will build a fungible token contract from scratch using Runar. The token uses the UTXO model natively -- each token holder's balance is a separate UTXO on the BSV blockchain, and all transfers, sends, and merges are enforced by on-chain covenants.
+
+By the end of this tutorial, you will understand:
+
+- How `StatefulSmartContract` maintains mutable state across transactions
+- The UTXO-native token model (one UTXO per balance)
+- Covenant enforcement using `SigHashPreimage`, `checkPreimage`, and `extractOutputHash`
+- Multi-output transactions with `addOutput`
+- Testing stateful contracts with `TestContract`
+
+## Prerequisites
+
+- Runar CLI installed and a project initialized (see [Hello World Tutorial](/docs/en/tutorials/hello-world))
+- Familiarity with `SmartContract` basics
+
+## Understanding the UTXO Token Model
+
+Traditional account-based blockchains store token balances in a global mapping. Runar tokens work differently: each token balance is a UTXO. When Alice holds 100 tokens, that is a specific UTXO on the blockchain containing the token contract code and the state `{ owner: Alice, balance: 100 }`.
+
+Transferring tokens means spending the current UTXO and creating new UTXOs with updated state. The contract's covenant enforces that the total balance is conserved -- you cannot create tokens out of thin air or destroy them without the owner's consent.
+
+This model has important advantages:
+
+- **Parallelism** -- Different token holders can transact simultaneously without contention.
+- **Privacy** -- Token transfers do not touch a global state; only the involved UTXOs are affected.
+- **Scalability** -- The BSV network processes UTXO transactions efficiently at scale.
+
+## Designing the Token Contract
+
+The token contract needs three operations:
+
+| Method | Description |
+| --- | --- |
+| `transfer` | Split a balance: send some tokens to a new owner, keep the rest |
+| `send` | Spend the entire UTXO (full balance transfer) |
+| `merge` | Consolidate a token UTXO (used when combining balances) |
+
+The contract state consists of an `owner` (public key) and a `balance` (bigint). The owner is `readonly` because it is set at creation and identifies who can operate on this specific UTXO. The balance is mutable because transfers change it.
+
+## Writing the Contract
+
+Create `contracts/FungibleToken.runar.ts`:
+
+```typescript
+import {
+  StatefulSmartContract,
+  assert,
+  PubKey,
+  Sig,
+  checkSig,
+  SigHashPreimage,
+  checkPreimage,
+  extractOutputHash,
+  hash256,
+  num2bin,
+} from 'runar-lang';
+
+class FungibleTokenExample extends StatefulSmartContract {
+  readonly owner: PubKey;
+  balance: bigint;
+
+  constructor(owner: PubKey, balance: bigint) {
+    super(owner, balance);
+    this.owner = owner;
+    this.balance = balance;
+  }
+
+  public transfer(
+    sig: Sig,
+    amount: bigint,
+    newOwner: PubKey,
+    txPreimage: SigHashPreimage
+  ) {
+    assert(checkSig(sig, this.owner));
+    assert(amount > 0n);
+    assert(amount <= this.balance);
+    assert(checkPreimage(txPreimage));
+
+    this.balance = this.balance - amount;
+    this.addOutput(1n, this.owner, this.balance);
+    this.addOutput(1n, newOwner, amount);
+
+    const expectedHash = hash256(this.buildStateOutput());
+    assert(extractOutputHash(txPreimage) === expectedHash);
+  }
+
+  public send(sig: Sig, txPreimage: SigHashPreimage) {
+    assert(checkSig(sig, this.owner));
+    assert(checkPreimage(txPreimage));
+  }
+
+  public merge(sig: Sig, txPreimage: SigHashPreimage) {
+    assert(checkSig(sig, this.owner));
+    assert(checkPreimage(txPreimage));
+
+    this.addOutput(1n, this.owner, this.balance);
+
+    const expectedHash = hash256(this.buildStateOutput());
+    assert(extractOutputHash(txPreimage) === expectedHash);
+  }
+}
+
+export { FungibleTokenExample };
+```
+
+### Line-by-Line Walkthrough
+
+#### The Base Class
+
+```typescript
+class FungibleTokenExample extends StatefulSmartContract {
+```
+
+This extends `StatefulSmartContract` instead of `SmartContract`. Stateful contracts can have mutable properties and use the OP_PUSH_TX pattern to enforce state transitions. The compiler automatically injects preimage verification and state continuation logic.
+
+#### Properties
+
+```typescript
+readonly owner: PubKey;
+balance: bigint;
+```
+
+- `owner` is `readonly` -- it is fixed when the UTXO is created and embedded in the locking script.
+- `balance` is mutable -- it changes when tokens are transferred. The updated value is encoded in the new output's locking script.
+
+#### The Constructor
+
+```typescript
+constructor(owner: PubKey, balance: bigint) {
+  super(owner, balance);
+  this.owner = owner;
+  this.balance = balance;
+}
+```
+
+Both parameters are passed to `super()`. For `StatefulSmartContract`, this registers them as the initial state that gets serialized into the first UTXO.
+
+#### The `transfer` Method
+
+This is the core operation. Let's examine each line:
+
+```typescript
+public transfer(sig: Sig, amount: bigint, newOwner: PubKey, txPreimage: SigHashPreimage) {
+```
+
+The method takes four arguments from the unlocking script:
+- `sig` -- The current owner's signature authorizing the transfer
+- `amount` -- How many tokens to send
+- `newOwner` -- The recipient's public key
+- `txPreimage` -- The serialized transaction preimage (needed for covenant enforcement)
+
+```typescript
+assert(checkSig(sig, this.owner));
+```
+
+Only the current owner can transfer tokens. This is the authorization check.
+
+```typescript
+assert(amount > 0n);
+assert(amount <= this.balance);
+```
+
+Validate the transfer amount: must be positive and cannot exceed the available balance. These two lines prevent token creation from nothing and ensure the sender has sufficient funds.
+
+```typescript
+assert(checkPreimage(txPreimage));
+```
+
+Verify the preimage matches the current transaction. This is the foundation of covenant enforcement -- it binds the contract logic to the actual transaction being constructed.
+
+```typescript
+this.balance = this.balance - amount;
+this.addOutput(1n, this.owner, this.balance);
+this.addOutput(1n, newOwner, amount);
+```
+
+Update the state and define the outputs:
+1. The first output is the sender's change UTXO with the remaining balance.
+2. The second output is the recipient's new UTXO with the transferred amount.
+
+The `1n` is the satoshi amount for each output (1 satoshi, the minimum). The remaining arguments define the state serialized into each output.
+
+```typescript
+const expectedHash = hash256(this.buildStateOutput());
+assert(extractOutputHash(txPreimage) === expectedHash);
+```
+
+The covenant enforcement: `buildStateOutput()` serializes the outputs defined by `addOutput` calls. `extractOutputHash(txPreimage)` extracts the hash of the transaction's actual outputs from the preimage. By asserting they are equal, the contract guarantees the spending transaction creates exactly the outputs the contract specified. The spender cannot redirect tokens elsewhere.
+
+#### The `send` Method
+
+```typescript
+public send(sig: Sig, txPreimage: SigHashPreimage) {
+  assert(checkSig(sig, this.owner));
+  assert(checkPreimage(txPreimage));
+}
+```
+
+`send` is a simple spend -- the owner authorizes spending the entire UTXO without constraining the outputs. This is used when the full balance is being transferred as part of a larger transaction (for example, when the recipient constructs a transaction that consumes this UTXO as an input alongside other inputs).
+
+#### The `merge` Method
+
+```typescript
+public merge(sig: Sig, txPreimage: SigHashPreimage) {
+  assert(checkSig(sig, this.owner));
+  assert(checkPreimage(txPreimage));
+
+  this.addOutput(1n, this.owner, this.balance);
+
+  const expectedHash = hash256(this.buildStateOutput());
+  assert(extractOutputHash(txPreimage) === expectedHash);
+}
+```
+
+`merge` consolidates a token UTXO. When an owner has multiple small-balance UTXOs, they can merge them into a single UTXO in one transaction. Each input UTXO calls `merge`, and the transaction produces one output with the combined balance.
+
+## Compiling the Contract
+
+```bash
+runar compile contracts/FungibleToken.runar.ts --output ./artifacts --asm
+```
+
+This produces `artifacts/FungibleTokenExample.json`. The artifact will be significantly larger than the P2PKH artifact because stateful contracts include the OP_PUSH_TX preimage verification logic in the script.
+
+## Testing the Token
+
+Create `tests/FungibleToken.test.ts`:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('FungibleTokenExample', () => {
+  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
+  const bobKey = bsv.PrivateKey.fromRandom('testnet');
+  const alicePub = aliceKey.toPublicKey().toString();
+  const bobPub = bobKey.toPublicKey().toString();
+
+  it('should transfer tokens to a new owner', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/FungibleToken.runar.ts',
+      'FungibleTokenExample'
+    );
+
+    // Alice starts with 100 tokens
+    const instance = contract.create(alicePub, 100n);
+
+    // Transfer 30 tokens to Bob
+    const result = await instance.call('transfer', {
+      sig: instance.sign(aliceKey),
+      amount: 30n,
+      newOwner: bobPub,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(true);
+    // Verify outputs: Alice has 70, Bob has 30
+    expect(result.outputs).toHaveLength(2);
+  });
+
+  it('should reject transfer exceeding balance', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/FungibleToken.runar.ts',
+      'FungibleTokenExample'
+    );
+
+    const instance = contract.create(alicePub, 50n);
+
+    const result = await instance.call('transfer', {
+      sig: instance.sign(aliceKey),
+      amount: 100n,
+      newOwner: bobPub,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should reject transfer with wrong signature', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/FungibleToken.runar.ts',
+      'FungibleTokenExample'
+    );
+
+    const instance = contract.create(alicePub, 100n);
+
+    // Bob tries to transfer Alice's tokens
+    const result = await instance.call('transfer', {
+      sig: instance.sign(bobKey),
+      amount: 50n,
+      newOwner: bobPub,
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should allow owner to send entire balance', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/FungibleToken.runar.ts',
+      'FungibleTokenExample'
+    );
+
+    const instance = contract.create(alicePub, 100n);
+
+    const result = await instance.call('send', {
+      sig: instance.sign(aliceKey),
+      txPreimage: instance.getPreimage(),
+    });
+
+    expect(result.success).toBe(true);
+  });
+});
+```
+
+Run the tests:
+
+```bash
+runar test
+```
+
+## Token Lifecycle Example
+
+Here is a concrete example of how tokens flow through the system:
+
+1. **Mint** -- Deploy the contract with `owner: Alice, balance: 1000`. This creates the first token UTXO.
+
+2. **Transfer** -- Alice transfers 300 to Bob. The transaction spends Alice's UTXO and creates two new UTXOs:
+   - Alice: `{ owner: Alice, balance: 700 }`
+   - Bob: `{ owner: Bob, balance: 300 }`
+
+3. **Transfer again** -- Bob transfers 100 to Carol. Bob's UTXO is spent:
+   - Bob: `{ owner: Bob, balance: 200 }`
+   - Carol: `{ owner: Carol, balance: 100 }`
+
+4. **Merge** -- If Alice receives tokens from multiple sources, she might have several UTXOs. She can merge them into one UTXO for cleaner accounting.
+
+Every step is enforced on-chain. The covenant in the `transfer` method guarantees that balances are conserved -- the sum of output balances always equals the input balance.
+
+## Deploying the Token
+
+```bash
+runar compile contracts/FungibleToken.runar.ts --output ./artifacts
+
+runar deploy ./artifacts/FungibleTokenExample.json \
+  --network testnet \
+  --key <your-WIF-private-key> \
+  --satoshis 1
+```
+
+The `--satoshis 1` is the dust amount for the UTXO. The token's value is tracked in the contract state (`balance`), not in the satoshi amount of the UTXO.
+
+## Key Concepts Recap
+
+| Concept | What You Learned |
+| --- | --- |
+| `StatefulSmartContract` | Contracts with mutable state carried forward across transactions |
+| `SigHashPreimage` | Serialized transaction data used for covenant enforcement |
+| `checkPreimage` | Verifies the preimage matches the current transaction |
+| `extractOutputHash` | Extracts the hash of actual outputs from the preimage |
+| `addOutput` | Defines required outputs in the spending transaction |
+| `buildStateOutput` | Serializes all outputs defined by `addOutput` calls |
+| UTXO token model | Each balance is a separate UTXO; transfers create new UTXOs |
+
+## What's Next
+
+- [NFT Tutorial](/docs/en/tutorials/nft) -- Build a non-fungible token with unique metadata and transfer/burn operations
+- [Multi-Party Escrow Tutorial](/docs/en/tutorials/multi-party-escrow) -- Learn multi-signature patterns with buyer, seller, and arbiter roles
+- [Example Gallery](/docs/en/examples/gallery) -- Browse annotated contract examples

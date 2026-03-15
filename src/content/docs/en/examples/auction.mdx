@@ -1,0 +1,344 @@
+---
+title: "Auction"
+description: "On-chain auction contract."
+section: "examples"
+order: 40
+lang: "en"
+---
+
+The auction example implements an on-chain English auction where bidders compete by spending the current auction UTXO with a higher bid. The covenant enforces that each bid exceeds the previous one, that bidding respects the deadline, and that the auctioneer can close the auction at any time. This contract demonstrates stateful multi-party interaction, locktime-based deadlines, and competitive state transitions.
+
+## Contract Source
+
+```typescript
+import {
+  StatefulSmartContract,
+  assert,
+  PubKey,
+  Sig,
+  checkSig,
+  SigHashPreimage,
+  checkPreimage,
+  extractOutputHash,
+  extractLocktime,
+  hash256,
+} from 'runar-lang';
+
+class Auction extends StatefulSmartContract {
+  readonly auctioneer: PubKey;
+  readonly deadline: bigint;
+  highBidder: PubKey;
+  highBid: bigint;
+
+  constructor(
+    auctioneer: PubKey,
+    deadline: bigint,
+    highBidder: PubKey,
+    highBid: bigint
+  ) {
+    super(auctioneer, deadline, highBidder, highBid);
+    this.auctioneer = auctioneer;
+    this.deadline = deadline;
+    this.highBidder = highBidder;
+    this.highBid = highBid;
+  }
+
+  public bid(bidder: PubKey, amount: bigint, txPreimage: SigHashPreimage) {
+    assert(checkPreimage(txPreimage));
+    assert(amount > this.highBid);
+    assert(extractLocktime(txPreimage) < this.deadline);
+
+    this.highBidder = bidder;
+    this.highBid = amount;
+    this.addOutput(
+      amount,
+      this.auctioneer,
+      this.deadline,
+      this.highBidder,
+      this.highBid
+    );
+
+    const expectedHash = hash256(this.buildStateOutput());
+    assert(extractOutputHash(txPreimage) === expectedHash);
+  }
+
+  public close(sig: Sig) {
+    assert(checkSig(sig, this.auctioneer));
+  }
+}
+
+export { Auction };
+```
+
+## Annotations
+
+### Readonly vs. Mutable State
+
+```typescript
+readonly auctioneer: PubKey;
+readonly deadline: bigint;
+highBidder: PubKey;
+highBid: bigint;
+```
+
+The contract has two fixed properties and two that evolve:
+
+- **`auctioneer`** (readonly) -- The public key of the auction creator. Only this key can close the auction. Fixed at deployment.
+- **`deadline`** (readonly) -- The block height or timestamp after which no more bids are accepted. Fixed at deployment.
+- **`highBidder`** (mutable) -- The public key of the current highest bidder. Updated with each new bid.
+- **`highBid`** (mutable) -- The current highest bid amount in satoshis. Updated with each new bid.
+
+### Constructor
+
+```typescript
+constructor(auctioneer: PubKey, deadline: bigint, highBidder: PubKey, highBid: bigint) {
+  super(auctioneer, deadline, highBidder, highBid);
+  // ...
+}
+```
+
+All four values are passed to `super()` to register them as the initial contract state. When deploying, you set the initial `highBidder` to the auctioneer (or a placeholder) and `highBid` to the starting price.
+
+### The `bid` Method
+
+This is the core auction logic. Let's trace each line:
+
+```typescript
+public bid(bidder: PubKey, amount: bigint, txPreimage: SigHashPreimage) {
+```
+
+A bidder provides their public key, their bid amount, and the transaction preimage (for covenant enforcement).
+
+```typescript
+assert(checkPreimage(txPreimage));
+```
+
+Verify the preimage matches the current transaction. This is the foundation of all covenant logic -- without this, the remaining assertions about outputs would be meaningless.
+
+```typescript
+assert(amount > this.highBid);
+```
+
+The new bid must strictly exceed the current highest bid. Equal bids are rejected. This is the auction's competitive mechanism -- each bid must improve on the last.
+
+```typescript
+assert(extractLocktime(txPreimage) < this.deadline);
+```
+
+The transaction's locktime must be before the deadline. `extractLocktime` reads the `nLockTime` field from the serialized preimage. By asserting it is less than `this.deadline`, the contract ensures no bids can be placed after the auction expires.
+
+This is a key technique in Runar: using the transaction's own locktime as a time constraint. The BSV network enforces that a transaction with `nLockTime = T` cannot be mined before block `T`, so the contract can reason about time by inspecting this field.
+
+```typescript
+this.highBidder = bidder;
+this.highBid = amount;
+```
+
+Update the mutable state. The new bidder becomes the high bidder, and their amount becomes the high bid.
+
+```typescript
+this.addOutput(amount, this.auctioneer, this.deadline, this.highBidder, this.highBid);
+```
+
+Define the new auction UTXO. The satoshi amount is the bid amount (the actual funds being bid are locked in the UTXO). The state values are the full set of contract properties, including the updated bidder and bid.
+
+```typescript
+const expectedHash = hash256(this.buildStateOutput());
+assert(extractOutputHash(txPreimage) === expectedHash);
+```
+
+Covenant enforcement: the spending transaction must create exactly the output defined by `addOutput`. The spender cannot redirect the funds or tamper with the auction state.
+
+#### What Happens to the Previous Bidder's Funds?
+
+When a new bid comes in, the previous UTXO (containing the previous high bid) is spent. The new UTXO contains the new bid amount. The previous bidder's refund must be handled in the transaction construction -- the spending transaction includes an additional output that returns the previous bid to the previous bidder.
+
+In a full implementation, the contract would use a second `addOutput` call to enforce the refund:
+
+```typescript
+// Refund previous bidder
+this.addOutput(this.highBid, /* previous bidder address */);
+```
+
+The simplified version shown here focuses on the core auction state machine. A production implementation would add refund enforcement to the covenant.
+
+### The `close` Method
+
+```typescript
+public close(sig: Sig) {
+  assert(checkSig(sig, this.auctioneer));
+}
+```
+
+Only the auctioneer can close the auction. This is a terminal method -- it spends the UTXO without creating a continuation. After closing, the auctioneer collects the highest bid and delivers the auctioned item to the highest bidder off-chain.
+
+The `close` method does not check the deadline. The auctioneer can close at any time, even before the deadline. This is by design -- the auctioneer might want to accept an early bid or cancel the auction entirely.
+
+## Auction Lifecycle
+
+1. **Create** -- The auctioneer deploys the contract with a starting price, deadline, and their public key. The initial UTXO is funded with the starting price.
+
+   ```bash
+   runar deploy ./artifacts/Auction.json \
+     --network testnet \
+     --key <auctioneer-WIF> \
+     --satoshis 1000
+   ```
+
+2. **Bid** -- A bidder constructs a transaction that spends the current auction UTXO and creates a new one with a higher bid. The transaction includes additional funds to cover the increased bid.
+
+3. **Outbid** -- Another bidder places a higher bid. The previous bid UTXO is spent, the previous bidder is refunded, and a new UTXO with the higher bid is created.
+
+4. **Close** -- After the deadline passes (or whenever the auctioneer decides), the auctioneer signs a `close` transaction to collect the winning bid.
+
+## Test Code
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { bsv } from 'runar-sdk';
+
+describe('Auction', () => {
+  const auctioneerKey = bsv.PrivateKey.fromRandom('testnet');
+  const bidder1Key = bsv.PrivateKey.fromRandom('testnet');
+  const bidder2Key = bsv.PrivateKey.fromRandom('testnet');
+  const auctioneerPub = auctioneerKey.toPublicKey().toString();
+  const bidder1Pub = bidder1Key.toPublicKey().toString();
+  const bidder2Pub = bidder2Key.toPublicKey().toString();
+
+  const deadline = 800000n; // Block height deadline
+
+  it('should accept a bid higher than current', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Auction.runar.ts',
+      'Auction'
+    );
+    const instance = contract.create(
+      auctioneerPub,
+      deadline,
+      auctioneerPub,
+      1000n
+    );
+
+    const result = await instance.call('bid', {
+      bidder: bidder1Pub,
+      amount: 2000n,
+      txPreimage: instance.getPreimage({ locktime: 799000n }),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject a bid lower than current', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Auction.runar.ts',
+      'Auction'
+    );
+    const instance = contract.create(
+      auctioneerPub,
+      deadline,
+      bidder1Pub,
+      5000n
+    );
+
+    const result = await instance.call('bid', {
+      bidder: bidder2Pub,
+      amount: 3000n,
+      txPreimage: instance.getPreimage({ locktime: 799000n }),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should reject a bid after deadline', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Auction.runar.ts',
+      'Auction'
+    );
+    const instance = contract.create(
+      auctioneerPub,
+      deadline,
+      auctioneerPub,
+      1000n
+    );
+
+    const result = await instance.call('bid', {
+      bidder: bidder1Pub,
+      amount: 5000n,
+      txPreimage: instance.getPreimage({ locktime: 900000n }),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should allow auctioneer to close', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Auction.runar.ts',
+      'Auction'
+    );
+    const instance = contract.create(
+      auctioneerPub,
+      deadline,
+      bidder1Pub,
+      5000n
+    );
+
+    const result = await instance.call('close', {
+      sig: instance.sign(auctioneerKey),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject close by non-auctioneer', async () => {
+    const contract = await TestContract.fromSource(
+      'contracts/Auction.runar.ts',
+      'Auction'
+    );
+    const instance = contract.create(
+      auctioneerPub,
+      deadline,
+      bidder1Pub,
+      5000n
+    );
+
+    const result = await instance.call('close', {
+      sig: instance.sign(bidder1Key),
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+## Running the Example
+
+```bash
+# Compile
+runar compile contracts/Auction.runar.ts --output ./artifacts --asm
+
+# Test
+runar test
+
+# Deploy an auction with 1000 sat starting price, deadline at block 850000
+runar deploy ./artifacts/Auction.json \
+  --network testnet \
+  --key <auctioneer-WIF> \
+  --satoshis 1000
+```
+
+## Design Notes
+
+**Locktime as a deadline mechanism.** The `extractLocktime` technique is a powerful pattern for time-based contracts on BSV. The contract does not need an oracle or external timestamp -- it uses the transaction's own `nLockTime` field, which is enforced by the network's consensus rules.
+
+**Open bidding.** This auction does not require bidder authentication. Anyone can bid by providing their public key and a higher amount. The `bid` method does not check a signature from the bidder because the bidder is spending their own funds to fund the new UTXO -- economic incentives align without explicit authorization.
+
+**Auctioneer trust.** The auctioneer can close the auction at any time, including before the deadline. In a trustless version, you could add a condition that `close` also requires `extractLocktime(txPreimage) >= this.deadline`, preventing early closure.
+
+## Key Takeaways
+
+- Stateful contracts can model competitive multi-party interactions like auctions.
+- `extractLocktime` enables deadline enforcement without external oracles.
+- The covenant (`addOutput` + `extractOutputHash`) guarantees valid bid progression.
+- Terminal methods like `close` end the state machine and release funds.
+- Different methods in the same contract serve different roles (bidder vs. auctioneer).
