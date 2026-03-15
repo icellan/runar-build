@@ -1,0 +1,342 @@
+---
+title: "Token Contracts"
+description: "Creating fungible and non-fungible tokens."
+section: "sdk"
+order: 50
+lang: "en"
+---
+
+Runar provides built-in patterns for creating both fungible and non-fungible tokens on BSV. Tokens are represented as UTXOs with covenant-enforced rules governing minting, transfers, and burns.
+
+## Token Model Overview
+
+Tokens in Runar are stateful contracts. Each token UTXO carries:
+- The token contract logic (locking script).
+- Serialized state (balance for fungible tokens, metadata for NFTs).
+- A satoshi amount (to keep the UTXO alive on-chain).
+
+Token operations are state transitions on these UTXOs. A transfer creates new UTXOs with updated ownership. A burn destroys the UTXO without creating a continuation. A merge combines multiple UTXOs into one.
+
+All token rules are enforced by the contract script itself -- no external indexer or trusted party is needed to validate token operations.
+
+## Fungible Tokens
+
+A fungible token contract tracks a balance and an owner. The contract enforces conservation of value: you cannot create tokens out of thin air or transfer more than you own.
+
+### Contract Definition
+
+```typescript
+import {
+  StatefulSmartContract,
+  assert,
+  SigHashPreimage,
+  PubKey,
+  Sig,
+  Ripemd160,
+  hash160,
+  checkSig,
+} from 'runar-lang';
+
+class FungibleToken extends StatefulSmartContract {
+  balance: bigint;
+  ownerPubKeyHash: Ripemd160;
+
+  constructor(balance: bigint, ownerPubKeyHash: Ripemd160) {
+    super(balance, ownerPubKeyHash);
+    this.balance = balance;
+    this.ownerPubKeyHash = ownerPubKeyHash;
+  }
+
+  public transfer(
+    amount: bigint,
+    newOwnerPubKeyHash: Ripemd160,
+    sig: Sig,
+    pubKey: PubKey,
+    preimage: SigHashPreimage,
+  ) {
+    // Verify ownership
+    assert(hash160(pubKey) === this.ownerPubKeyHash);
+    assert(checkSig(sig, pubKey));
+
+    // Verify amount
+    assert(amount > 0n);
+    assert(amount <= this.balance);
+
+    // Continuation output: remainder stays with current owner
+    const remainder = this.balance - amount;
+    if (remainder > 0n) {
+      this.addOutput(this.ctx.utxo.satoshis, remainder, this.ownerPubKeyHash);
+    }
+
+    // New output: transferred amount goes to new owner
+    this.addOutput(546n, amount, newOwnerPubKeyHash);
+
+    assert(this.checkPreimage(preimage));
+  }
+
+  public send(
+    newOwnerPubKeyHash: Ripemd160,
+    sig: Sig,
+    pubKey: PubKey,
+    preimage: SigHashPreimage,
+  ) {
+    // Verify ownership
+    assert(hash160(pubKey) === this.ownerPubKeyHash);
+    assert(checkSig(sig, pubKey));
+
+    // Transfer entire balance to new owner
+    this.addOutput(this.ctx.utxo.satoshis, this.balance, newOwnerPubKeyHash);
+
+    assert(this.checkPreimage(preimage));
+  }
+
+  public merge(
+    otherBalance: bigint,
+    otherOwnerPubKeyHash: Ripemd160,
+    sig: Sig,
+    pubKey: PubKey,
+    preimage: SigHashPreimage,
+  ) {
+    // Both UTXOs must belong to the same owner
+    assert(hash160(pubKey) === this.ownerPubKeyHash);
+    assert(otherOwnerPubKeyHash === this.ownerPubKeyHash);
+    assert(checkSig(sig, pubKey));
+
+    // Anti-inflation proof: merged balance must equal sum of inputs
+    const mergedBalance = this.balance + otherBalance;
+    this.addOutput(this.ctx.utxo.satoshis, mergedBalance, this.ownerPubKeyHash);
+
+    assert(this.checkPreimage(preimage));
+  }
+}
+
+export { FungibleToken };
+```
+
+### Transfer (Split)
+
+The `transfer` method splits a token UTXO into two outputs:
+1. **Remainder output** -- The sender keeps `balance - amount` tokens.
+2. **Transfer output** -- The recipient receives `amount` tokens.
+
+If the sender transfers their entire balance, no remainder output is created (the `if` guard skips it).
+
+### Send (Full Transfer)
+
+The `send` method is a simpler version of transfer that moves the entire balance to a new owner without splitting. This avoids creating a remainder output and is cheaper in terms of transaction size.
+
+### Merge (2-to-1 with Anti-Inflation Proof)
+
+The `merge` method combines two token UTXOs into one. This is necessary because repeated transfers create many small UTXOs. Merging consolidates them.
+
+The **anti-inflation proof** is critical: the merge method requires that the merged output's balance equals exactly the sum of the two input balances. The second input's balance and owner are passed as arguments and verified against the spending transaction's second input. This prevents anyone from creating tokens during a merge operation.
+
+### Using FungibleToken with the SDK
+
+```typescript
+import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import ftArtifact from './artifacts/FungibleToken.json';
+
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('cN3L4FfPtE7WjknM...');
+const ownerPubKeyHash = hash160(signer.publicKey);
+
+// Mint: Deploy with initial balance
+const token = new RunarContract(ftArtifact, {
+  balance: 1000000n,
+  ownerPubKeyHash,
+});
+token.setState({ balance: 1000000n, ownerPubKeyHash });
+token.connect(provider, signer);
+await token.deploy({ satoshis: 10000 });
+
+// Transfer 5000 tokens to another address
+const recipientPubKeyHash = '1234abcd5678ef...';
+await token.call('transfer', {
+  amount: 5000n,
+  newOwnerPubKeyHash: recipientPubKeyHash,
+  sig: signer,
+  pubKey: signer.publicKey,
+  preimage: 'auto',
+}, { outputs: 'auto' });
+
+console.log(token.state);
+// { balance: 995000n, ownerPubKeyHash: '...' }
+```
+
+## Non-Fungible Tokens (NFTs)
+
+An NFT contract represents a unique asset. Unlike fungible tokens, NFTs are not split or merged -- they are transferred whole or burned.
+
+### Contract Definition
+
+```typescript
+import {
+  StatefulSmartContract,
+  assert,
+  SigHashPreimage,
+  PubKey,
+  Sig,
+  Ripemd160,
+  ByteString,
+  hash160,
+  checkSig,
+} from 'runar-lang';
+
+class NFT extends StatefulSmartContract {
+  ownerPubKeyHash: Ripemd160;
+  tokenId: ByteString;
+  metadata: ByteString;
+
+  constructor(ownerPubKeyHash: Ripemd160, tokenId: ByteString, metadata: ByteString) {
+    super(ownerPubKeyHash, tokenId, metadata);
+    this.ownerPubKeyHash = ownerPubKeyHash;
+    this.tokenId = tokenId;
+    this.metadata = metadata;
+  }
+
+  public transfer(
+    newOwnerPubKeyHash: Ripemd160,
+    sig: Sig,
+    pubKey: PubKey,
+    preimage: SigHashPreimage,
+  ) {
+    // Verify current owner
+    assert(hash160(pubKey) === this.ownerPubKeyHash);
+    assert(checkSig(sig, pubKey));
+
+    // State continuation with new owner, same tokenId and metadata
+    this.addOutput(
+      this.ctx.utxo.satoshis,
+      newOwnerPubKeyHash,
+      this.tokenId,
+      this.metadata,
+    );
+
+    assert(this.checkPreimage(preimage));
+  }
+
+  public burn(
+    sig: Sig,
+    pubKey: PubKey,
+    preimage: SigHashPreimage,
+  ) {
+    // Verify current owner
+    assert(hash160(pubKey) === this.ownerPubKeyHash);
+    assert(checkSig(sig, pubKey));
+
+    // No addOutput() call -- UTXO is destroyed
+    // Funds go to a change output (handled by the SDK)
+    assert(this.checkPreimage(preimage));
+  }
+}
+
+export { NFT };
+```
+
+### Transfer (State Continuation)
+
+The `transfer` method creates a continuation output with a new `ownerPubKeyHash` while preserving the `tokenId` and `metadata`. This ensures the NFT's identity is maintained across transfers.
+
+### Burn (No Continuation)
+
+The `burn` method does not call `addOutput()`. This means no continuation UTXO is created -- the NFT is destroyed. The satoshis locked in the UTXO are released to a change output.
+
+### Using NFT with the SDK
+
+```typescript
+import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import nftArtifact from './artifacts/NFT.json';
+
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('cN3L4FfPtE7WjknM...');
+
+// Mint an NFT
+const nft = new RunarContract(nftArtifact, {
+  ownerPubKeyHash: hash160(signer.publicKey),
+  tokenId: 'deadbeef01',
+  metadata: '48656c6c6f', // "Hello" in hex
+});
+nft.setState({
+  ownerPubKeyHash: hash160(signer.publicKey),
+  tokenId: 'deadbeef01',
+  metadata: '48656c6c6f',
+});
+nft.connect(provider, signer);
+await nft.deploy({ satoshis: 1000 });
+
+// Transfer to a new owner
+const newOwner = 'abcd1234...';
+await nft.call('transfer', {
+  newOwnerPubKeyHash: newOwner,
+  sig: signer,
+  pubKey: signer.publicKey,
+  preimage: 'auto',
+}, { outputs: 'auto' });
+
+console.log(nft.state.ownerPubKeyHash); // 'abcd1234...'
+console.log(nft.state.tokenId);          // 'deadbeef01' (unchanged)
+
+// Burn the NFT (must be done by current owner)
+// Note: current owner is newOwner, so signer must be their key
+```
+
+## The TokenWallet Class
+
+For application code that manages many token UTXOs, the SDK provides the `TokenWallet` class. It wraps a provider and signer and provides high-level methods for token operations.
+
+```typescript
+import { TokenWallet } from 'runar-sdk';
+import ftArtifact from './artifacts/FungibleToken.json';
+
+const wallet = new TokenWallet(ftArtifact, provider, signer);
+```
+
+### TokenWallet Methods
+
+| Method | Description |
+| ------ | ----------- |
+| `getBalance()` | Sum balances across all token UTXOs owned by the signer |
+| `getUtxos()` | List all token UTXOs owned by the signer |
+| `transfer(amount, recipientPubKeyHash)` | Transfer tokens, automatically selecting UTXOs |
+| `merge()` | Merge all owned token UTXOs into one |
+
+### Example: Using TokenWallet
+
+```typescript
+const wallet = new TokenWallet(ftArtifact, provider, signer);
+
+// Check total balance across all UTXOs
+const balance = await wallet.getBalance();
+console.log('Total balance:', balance); // 1000000n
+
+// List individual UTXOs
+const utxos = await wallet.getUtxos();
+console.log('UTXOs:', utxos.length); // might be 3 UTXOs of varying balances
+
+// Transfer (wallet picks UTXOs automatically)
+await wallet.transfer(5000n, recipientPubKeyHash);
+
+// Merge all remaining UTXOs into one
+await wallet.merge();
+const utxosAfterMerge = await wallet.getUtxos();
+console.log('UTXOs after merge:', utxosAfterMerge.length); // 1
+```
+
+The `TokenWallet.transfer()` method is smart about UTXO selection. If you have three UTXOs with balances [100000, 500000, 400000] and want to transfer 150000, it will select the 500000 UTXO (or combine smaller ones) and produce a remainder output.
+
+## Token Operations Summary
+
+| Operation | Fungible | NFT |
+| --------- | -------- | --- |
+| Mint | Deploy with initial balance | Deploy with tokenId and metadata |
+| Transfer (partial) | `transfer(amount, recipient)` -- splits UTXO | Not applicable |
+| Transfer (full) | `send(recipient)` -- moves entire balance | `transfer(newOwner)` -- state continuation |
+| Merge | `merge()` -- 2-to-1 with anti-inflation proof | Not applicable |
+| Burn | Not in base contract (extend to add) | `burn()` -- no continuation output |
+
+## What's Next
+
+- [Inductive Contracts](/docs/en/sdk/inductive-contracts) -- The underlying pattern that tokens are built on
+- [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- How fees work in token transactions
+- [DAG Topology and Token Merges](/docs/en/advanced/dag-topology-and-token-merges) -- Advanced merge patterns

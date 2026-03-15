@@ -1,0 +1,323 @@
+---
+title: "Compilation Pipeline"
+description: "Stages from source to Bitcoin Script."
+section: "compiler"
+order: 20
+lang: "en"
+---
+
+Every Runar contract passes through a series of well-defined stages on its way from source code to deployable Bitcoin Script. This page walks through each stage of the compilation pipeline using a concrete example.
+
+## Running Example
+
+To illustrate each pass, we will trace a simple P2PKH contract through the entire pipeline:
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, Ripemd160, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Ripemd160;
+
+  constructor(pubKeyHash: Ripemd160) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+```
+
+This contract has one constructor parameter (`pubKeyHash`), one public method (`unlock`), and two assertions.
+
+## Pass 1: Parse (01-parse.ts)
+
+**Input:** Source text in any supported language.
+**Output:** `ContractNode` AST.
+
+The parser reads source code and produces a language-neutral abstract syntax tree. The parser used depends on the source language -- ts-morph for TypeScript, tree-sitter for Go, SWC for Rust, and a recursive descent parser for Python -- but the output is always the same `ContractNode` structure.
+
+For our P2PKH contract, the parser produces:
+
+```json
+{
+  "type": "ContractNode",
+  "name": "P2PKH",
+  "base": "SmartContract",
+  "constructorParams": [
+    { "name": "pubKeyHash", "type": "Ripemd160" }
+  ],
+  "stateFields": [
+    { "name": "pubKeyHash", "type": "Ripemd160", "readonly": true }
+  ],
+  "methods": [
+    {
+      "name": "unlock",
+      "visibility": "public",
+      "params": [
+        { "name": "sig", "type": "Sig" },
+        { "name": "pubKey", "type": "PubKey" }
+      ],
+      "body": [
+        {
+          "type": "AssertStatement",
+          "expression": {
+            "type": "BinaryExpression",
+            "operator": "===",
+            "left": {
+              "type": "CallExpression",
+              "callee": "hash160",
+              "args": [{ "type": "Identifier", "name": "pubKey" }]
+            },
+            "right": {
+              "type": "MemberExpression",
+              "object": "this",
+              "property": "pubKeyHash"
+            }
+          }
+        },
+        {
+          "type": "AssertStatement",
+          "expression": {
+            "type": "CallExpression",
+            "callee": "checkSig",
+            "args": [
+              { "type": "Identifier", "name": "sig" },
+              { "type": "Identifier", "name": "pubKey" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Key properties of the `ContractNode`:
+- All language-specific syntax is erased. There are no TypeScript-specific features like decorators or generics.
+- The base class (`SmartContract` vs `StatefulSmartContract`) is recorded so downstream passes know whether to inject statefulness machinery.
+- Constructor parameters and state fields are separated so the compiler knows which values are baked into the locking script.
+
+You can stop the pipeline here using the `parseOnly` option or the `runar compile --parse-only` CLI flag.
+
+## Pass 2: Validate (02-validate.ts)
+
+**Input:** `ContractNode` AST.
+**Output:** Validated `ContractNode` (same structure, with diagnostics).
+
+The validation pass enforces the Runar language subset. Not all valid TypeScript, Go, Rust, or Python is valid Runar. The validator checks a set of structural rules and reports diagnostics for any violations.
+
+**Rules enforced:**
+
+| Rule | Description |
+| ---- | ----------- |
+| One class per file | Each source file must define exactly one contract class |
+| No decorators | TypeScript decorators are not supported |
+| No generics | Generic type parameters are not supported |
+| No while loops | Only `for` loops with known bounds are allowed |
+| No try/catch | Exception handling is not supported (contracts use assert) |
+| No arrow functions | Only named method declarations are allowed |
+| Public methods end with assert | Every public method must have `assert()` as its last statement |
+| Constructor calls super | The constructor must call `super()` with all constructor params |
+| No dynamic property access | `obj[key]` is not allowed; only `obj.prop` |
+| No closures | Functions cannot capture variables from outer scopes |
+
+If any rule is violated, the validator produces a diagnostic with the file name, line number, and a description of the problem:
+
+```
+P2PKH.runar.ts:12:5 - error RNR001: While loops are not allowed in Runar contracts. Use a bounded for loop instead.
+```
+
+Validation does not modify the AST. It either passes (allowing the pipeline to continue) or fails with diagnostics.
+
+You can stop the pipeline here using the `validateOnly` option.
+
+## Pass 3: Type-check (03-typecheck.ts)
+
+**Input:** Validated `ContractNode` AST.
+**Output:** Type-checked `ContractNode` with type annotations.
+
+The type-checker verifies that all types in the contract are consistent and that domain-specific typing rules are satisfied.
+
+**Standard type checking:**
+- All variables and parameters have declared types.
+- Operators are applied to compatible types (`===` requires both sides to be the same type).
+- Function arguments match parameter types.
+- Return types are consistent (though Runar methods return void -- they either succeed or fail via assert).
+
+**Domain-specific subtyping rules:**
+
+Runar defines a subtyping hierarchy for Bitcoin-specific types:
+
+```
+Ripemd160  <:  ByteString
+Sha256     <:  ByteString
+PubKey     <:  ByteString
+Sig        <:  ByteString
+Rabin      <:  bigint
+```
+
+This means anywhere a `ByteString` is expected, you can pass a `Ripemd160`, `Sha256`, `PubKey`, or `Sig`. But the reverse is not true -- you cannot pass an arbitrary `ByteString` where a `PubKey` is expected.
+
+**Affine type consumption:**
+
+`Sig` and `SigHashPreimage` are **affine types** -- they can be used at most once. The type-checker tracks the consumption of these values and reports an error if a `Sig` or `SigHashPreimage` is used more than once in the same method body. This prevents a class of vulnerabilities where a signature is accidentally verified multiple times against different conditions.
+
+```
+P2PKH.runar.ts:15:5 - error RNR020: Affine type 'Sig' consumed more than once.
+  First use at line 14, second use at line 15.
+```
+
+You can stop the pipeline here using the `typecheckOnly` option.
+
+## Pass 4: ANF Lower (04-anf-lower.ts)
+
+**Input:** Type-checked `ContractNode` AST.
+**Output:** `ANFProgram` intermediate representation.
+
+This is the most important transformation in the pipeline. The ANF lowering pass converts the tree-structured AST into a flat sequence of let-bindings where every sub-expression is bound to a named temporary.
+
+**What ANF means.** In Administrative Normal Form, every operation takes only **atoms** (variables or literals) as arguments -- never nested expressions. The expression `hash160(pubKey) === this.pubKeyHash` becomes:
+
+```
+let t0 = hash160(pubKey)
+let t1 = eq(t0, this.pubKeyHash)
+```
+
+For our P2PKH contract, the full ANF output is:
+
+```
+program P2PKH {
+  constructor(pubKeyHash: Ripemd160)
+
+  method unlock(sig: Sig, pubKey: PubKey) {
+    let t0 = hash160(pubKey)
+    let t1 = eq(t0, this.pubKeyHash)
+    assert(t1)
+    let t2 = checkSig(sig, pubKey)
+    assert(t2)
+  }
+}
+```
+
+**Why ANF matters.** The ANF representation serves as the **conformance boundary** between the four independent compiler implementations. All four compilers (TypeScript, Go, Rust, Python) must produce byte-identical ANF for the same source contract. The temporaries are numbered sequentially (`t0`, `t1`, `t2`, ...) following a deterministic left-to-right, depth-first traversal of the AST.
+
+Because the ANF is fully flattened and sequential, it maps naturally to a stack machine. Each `let` binding corresponds to pushing a value onto the stack, and each use of a temporary corresponds to picking or rolling a value from a known stack position.
+
+## Pass 5: Stack Lower (05-stack-lower.ts)
+
+**Input:** `ANFProgram` intermediate representation.
+**Output:** `StackProgram` (opcodes with stack positions).
+
+The stack lowering pass resolves every named temporary in the ANF to a concrete stack position and inserts the appropriate stack manipulation opcodes.
+
+For our P2PKH contract:
+
+```
+// Stack state: [pubKeyHash] (constructor arg already on stack)
+// Unlock method entry: [pubKeyHash, sig, pubKey]
+
+OP_DUP                    // [pubKeyHash, sig, pubKey, pubKey]
+OP_HASH160                // [pubKeyHash, sig, pubKey, hash160(pubKey)]
+OP_2 OP_PICK              // [pubKeyHash, sig, pubKey, hash160(pubKey), pubKeyHash]
+OP_EQUALVERIFY            // [pubKeyHash, sig, pubKey]   (t1 asserted)
+OP_SWAP                   // [pubKeyHash, pubKey, sig]
+OP_OVER                   // [pubKeyHash, pubKey, sig, pubKey]
+OP_SWAP                   // [pubKeyHash, pubKey, pubKey, sig]
+-- wait, let the peephole fix this...
+```
+
+In practice, the stack lowering pass produces a sequence of `StackOp` instructions that each carry the opcode and a comment referencing the original ANF binding. The peephole optimizer then cleans up redundant stack manipulations.
+
+**Stack depth management.** The stack lowering pass tracks the current stack depth and enforces a maximum of 800 elements. When a value is buried too deep to reach efficiently with `OP_PICK` or `OP_ROLL`, the pass moves it to the alt-stack using `OP_TOALTSTACK` and retrieves it later with `OP_FROMALTSTACK`.
+
+**Stack position resolution.** Given the ANF `let t2 = checkSig(sig, pubKey)`, the stack lowerer knows that `sig` is at stack position 1 and `pubKey` is at position 0 (top of stack). It emits the minimal sequence of stack operations to arrange the arguments correctly for `OP_CHECKSIG`.
+
+## Pass 6: Emit (06-emit.ts)
+
+**Input:** `StackProgram` (opcodes with stack positions).
+**Output:** Bitcoin Script as hex string and optionally ASM.
+
+The emission pass converts the abstract stack operations into concrete Bitcoin Script bytes.
+
+For our P2PKH contract, the final output is:
+
+```
+Hex:  76a914<pubKeyHash>88ac
+ASM:  OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
+```
+
+**Key behaviors of the emitter:**
+
+**Optimal push data encoding.** The emitter selects the smallest possible encoding for data pushes:
+
+| Data Size | Encoding |
+| --------- | -------- |
+| 0 bytes | `OP_0` (0x00) |
+| 1-75 bytes | Direct push (length byte + data) |
+| 76-255 bytes | `OP_PUSHDATA1` + 1-byte length + data |
+| 256-65535 bytes | `OP_PUSHDATA2` + 2-byte length + data |
+
+**Constructor placeholders.** Constructor parameters that are not yet known at compile time are emitted as `OP_0` placeholders. The compiled artifact records the byte offsets of these placeholders so the SDK can fill them in at deployment time.
+
+**OP_CODESEPARATOR for stateful contracts.** Contracts that extend `StatefulSmartContract` use `OP_PUSH_TX` for transaction introspection. The emitter injects `OP_CODESEPARATOR` at the correct position so that the sighash computed by `OP_CHECKSIG` covers only the portion of the script after the separator.
+
+**Dispatch tables for multi-method contracts.** When a contract has more than one public method, the emitter generates a dispatch table at the beginning of the script. The unlocking script pushes a method index, and the dispatch table uses `OP_IF`/`OP_ELSE`/`OP_ENDIF` to branch to the correct method body.
+
+```
+// Dispatch table for a contract with methods: unlock, transfer
+<method_index>
+OP_0 OP_NUMEQUAL
+OP_IF
+  // unlock method body
+OP_ELSE
+  // transfer method body
+OP_ENDIF
+```
+
+## Optimization Passes
+
+Three optimization passes can run during compilation:
+
+### Peephole Optimizer (Stack IR)
+
+Runs after stack lowering, before emission. Applies 15 pattern-matching rules:
+
+| Pattern | Replacement | Savings |
+| ------- | ----------- | ------- |
+| `OP_SWAP OP_DROP` | `OP_NIP` | 1 byte |
+| `OP_SWAP OP_OVER` | `OP_TUCK` | 1 byte |
+| `OP_0 OP_PICK` | `OP_DUP` | 2 bytes |
+| `OP_1 OP_ROLL` | `OP_SWAP` | 2 bytes |
+| `OP_DUP OP_DROP` | (removed) | 2 bytes |
+| `OP_OVER OP_OVER` | `OP_2DUP` | 1 byte |
+| ... | ... | ... |
+
+### ANF EC Optimizer (ANF IR)
+
+Runs after ANF lowering, before stack lowering. Applies 12 algebraic simplification rules for secp256k1 elliptic curve operations. For example, adding the identity point is eliminated, and scalar multiplication by 1 is replaced with the value itself.
+
+### Constant Folder (ANF IR)
+
+Disabled by default. When enabled, evaluates constant expressions at compile time. For example, `sha256(0x68656c6c6f)` with a literal argument is replaced with its precomputed result. This reduces script size but changes the script hash, which can be surprising during audits.
+
+## End-to-End Summary
+
+```
+P2PKH.runar.ts
+   |  [Parse]      ts-morph reads TypeScript, produces ContractNode AST
+   |  [Validate]   Checks: one class, no generics, asserts at end, etc.
+   |  [Typecheck]  Verifies Ripemd160 <: ByteString, Sig is affine, etc.
+   |  [ANF Lower]  Flattens to: t0 = hash160(pubKey), t1 = eq(t0, ...), ...
+   |  [Stack Lower] Resolves t0 -> stack pos 0, inserts OP_PICK/OP_ROLL
+   |  [Emit]       Encodes as: 76a914<pubKeyHash>88ac
+   v
+P2PKH.json artifact
+```
+
+## What's Next
+
+- [Configuration](/docs/en/compiler/configuration) -- Compiler options and CLI flags for controlling the pipeline
+- [Output Artifacts](/docs/en/compiler/output-artifacts) -- Detailed format of the compiled artifact JSON

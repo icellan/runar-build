@@ -1,0 +1,251 @@
+---
+title: "SDK Overview"
+description: "Introduction to the Runar SDK."
+section: "sdk"
+order: 10
+lang: "en"
+---
+
+The Runar SDK provides the runtime libraries and tooling needed to deploy, call, and manage smart contracts on the BSV network. This page introduces the SDK's core components and how they fit together.
+
+## What the SDK Provides
+
+The SDK bridges the gap between a compiled contract artifact and a live transaction on the BSV blockchain. It handles:
+
+- **Contract instantiation.** Load a compiled artifact, provide constructor arguments, and get a contract instance with a fully resolved locking script.
+- **Deployment.** Build and broadcast a transaction that locks funds into the contract's locking script.
+- **Method calls.** Construct spending transactions that satisfy the contract's conditions.
+- **State management.** For stateful contracts, serialize and deserialize state, track continuation UTXOs, and build state transition transactions.
+- **Token operations.** Transfer, merge, and burn fungible and non-fungible tokens.
+- **Fee calculation.** Estimate transaction fees, select UTXOs, and compute change outputs.
+
+## Installation and Setup
+
+Install the SDK from npm:
+
+```bash
+pnpm add runar-sdk
+```
+
+The SDK has a peer dependency on `runar-compiler` for code generation features, but it is not required for runtime contract interaction.
+
+```typescript
+import {
+  RunarContract,
+  WhatsOnChainProvider,
+  LocalSigner,
+} from 'runar-sdk';
+```
+
+## The RunarContract Class
+
+`RunarContract` is the central class in the SDK. It wraps a compiled artifact and provides methods for deployment, calling, and state management.
+
+### Creating an Instance
+
+```typescript
+import { RunarContract } from 'runar-sdk';
+import artifact from './artifacts/P2PKH.json';
+
+const contract = new RunarContract(artifact, {
+  pubKeyHash: '89abcdef01234567890abcdef01234567890abcd',
+});
+```
+
+The second argument is a record of constructor arguments. These are spliced into the script at the positions defined by the artifact's `constructorSlots`. For contracts with no constructor parameters, pass an empty object or omit the argument.
+
+### Key Methods
+
+| Method | Description |
+| ------ | ----------- |
+| `deploy(provider, signer, options)` | Build and broadcast a deployment transaction |
+| `call(methodName, args, provider, signer, options)` | Build and broadcast a spending transaction |
+| `connect(provider, signer)` | Store a provider and signer for later use |
+| `setState(newState)` | Update the contract's in-memory state (stateful contracts) |
+| `get state` | Get the current in-memory state |
+| `getLockingScript()` | Get the fully resolved locking script hex |
+| `buildUnlockingScript(methodName, args)` | Build an unlocking script without broadcasting |
+| `static fromTxId(artifact, txid, outputIndex, provider)` | Reconnect to a deployed contract by transaction ID |
+
+### Connecting a Provider and Signer
+
+Rather than passing a provider and signer to every method call, you can connect them once:
+
+```typescript
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('your-WIF-private-key');
+
+contract.connect(provider, signer);
+
+// Now deploy and call without passing provider/signer each time
+const deployResult = await contract.deploy({ satoshis: 10000 });
+const callResult = await contract.call('unlock', { sig, pubKey });
+```
+
+## Providers
+
+Providers handle communication with the BSV network. They fetch UTXOs, broadcast transactions, and query transaction data.
+
+### WhatsOnChainProvider
+
+The primary provider for mainnet and testnet. Connects to the WhatsOnChain API.
+
+```typescript
+import { WhatsOnChainProvider } from 'runar-sdk';
+
+const mainnet = new WhatsOnChainProvider('mainnet');
+const testnet = new WhatsOnChainProvider('testnet');
+```
+
+Methods:
+- `getUtxos(address)` -- Fetch unspent outputs for an address.
+- `broadcast(txHex)` -- Broadcast a raw transaction.
+- `getTx(txid)` -- Fetch a transaction by ID.
+- `getOutput(txid, index)` -- Fetch a specific transaction output.
+
+### MockProvider
+
+A testing provider that simulates the network locally. No real transactions are broadcast.
+
+```typescript
+import { MockProvider } from 'runar-sdk';
+
+const mock = new MockProvider();
+mock.addUtxo({
+  txid: 'abc123...',
+  outputIndex: 0,
+  satoshis: 50000,
+  script: '76a914...88ac',
+});
+```
+
+The `MockProvider` maintains an in-memory UTXO set. When a transaction is "broadcast", it updates the UTXO set accordingly. This is the provider used in unit tests.
+
+### RPCProvider
+
+Connects directly to a BSV node via JSON-RPC. Useful for local development with a regtest node.
+
+```typescript
+import { RPCProvider } from 'runar-sdk';
+
+const rpc = new RPCProvider({
+  host: 'localhost',
+  port: 8332,
+  username: 'rpc_user',
+  password: 'rpc_pass',
+});
+```
+
+## Signers
+
+Signers produce cryptographic signatures for transaction inputs. They never expose the private key to the SDK -- they receive a sighash and return a signature.
+
+### LocalSigner
+
+Signs transactions using a WIF-encoded private key stored in memory.
+
+```typescript
+import { LocalSigner } from 'runar-sdk';
+
+const signer = new LocalSigner('cN3L4FfPt...'); // WIF private key
+```
+
+The `LocalSigner` is suitable for testing and server-side applications. Do not use it in browser contexts where the private key could be exposed.
+
+### ExternalSigner
+
+Delegates signing to an external process or service. You provide a callback function that receives the sighash and returns a signature.
+
+```typescript
+import { ExternalSigner } from 'runar-sdk';
+
+const signer = new ExternalSigner(async (sighash) => {
+  // Call your HSM, hardware wallet, or signing service
+  const signature = await mySigningService.sign(sighash);
+  return signature;
+});
+```
+
+### WalletSigner
+
+Integrates with browser wallet extensions that implement the Runar wallet interface.
+
+```typescript
+import { WalletSigner } from 'runar-sdk';
+
+const signer = new WalletSigner(window.runarWallet);
+```
+
+The `WalletSigner` prompts the user to approve each transaction through the wallet UI.
+
+## Deployment Flow
+
+The typical workflow from compilation to deployment:
+
+```
+1. Compile       runar compile contracts/P2PKH.runar.ts --output ./artifacts
+                 Produces: artifacts/P2PKH.json
+
+2. Instantiate   const contract = new RunarContract(artifact, constructorArgs)
+                 SDK fills constructor placeholders in the script
+
+3. Connect       contract.connect(provider, signer)
+                 Attaches network and signing capabilities
+
+4. Deploy        const result = await contract.deploy({ satoshis: 10000 })
+                 Builds tx, signs funding input, broadcasts
+                 Returns: { txid, outputIndex, satoshis }
+
+5. Call          const result = await contract.call('unlock', { sig, pubKey })
+                 Builds spending tx, signs, broadcasts
+                 Returns: { txid, success }
+```
+
+For stateful contracts, step 5 can be repeated multiple times, with each call producing a new UTXO that carries the updated state.
+
+## Reconnecting to a Deployed Contract
+
+If you already deployed a contract and need to interact with it in a new session, use `fromTxId`:
+
+```typescript
+const contract = await RunarContract.fromTxId(
+  artifact,
+  'a1b2c3d4e5f6...', // deployment txid
+  0,                   // output index
+  provider,
+);
+```
+
+This fetches the transaction from the network, extracts the locking script and satoshi value from the specified output, and reconstructs the contract instance. For stateful contracts, it also deserializes the state from the script.
+
+## Utility Functions
+
+The SDK exports several utility functions for advanced use cases:
+
+| Function | Description |
+| -------- | ----------- |
+| `serializeState(state, stateFields)` | Serialize a state object to bytes |
+| `deserializeState(bytes, stateFields)` | Deserialize bytes to a state object |
+| `extractStateFromScript(script, stateFields)` | Extract state from a locking script |
+| `computeOpPushTx(tx, inputIndex)` | Compute the OP_PUSH_TX preimage |
+| `buildDeployTransaction(contract, utxos, options)` | Build a deployment transaction manually |
+| `buildCallTransaction(contract, methodName, args, utxos, options)` | Build a call transaction manually |
+| `selectUtxos(utxos, targetAmount)` | Select UTXOs to cover a target amount |
+| `estimateDeployFee(contract, feeRate)` | Estimate the fee for deploying a contract |
+| `generateTypescript(artifact)` | Generate TypeScript bindings from an artifact |
+
+These functions are used internally by `RunarContract` but are also available for cases where you need fine-grained control over transaction construction.
+
+## SDK and Compiler Version Compatibility
+
+The SDK reads the `version` field in the artifact JSON to determine compatibility. The current SDK version (`0.1.x`) is compatible with artifacts that have `version: "runar-v0.1.0"`.
+
+If you upgrade the compiler and the artifact format changes, you will also need to upgrade the SDK. The SDK will throw a clear error if it encounters an artifact version it does not support.
+
+## What's Next
+
+- [Deploying a Contract](/docs/en/sdk/deploying) -- Step-by-step deployment guide
+- [Calling a Contract](/docs/en/sdk/calling) -- How to invoke contract methods
+- [Inductive Contracts](/docs/en/sdk/inductive-contracts) -- Building stateful contracts with state continuation
+- [Token Contracts](/docs/en/sdk/token-contracts) -- Fungible and non-fungible token patterns
+- [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- UTXO selection and fee management

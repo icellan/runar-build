@@ -1,0 +1,296 @@
+---
+title: "Calling a Contract"
+description: "Invoking contract methods."
+section: "sdk"
+order: 30
+lang: "en"
+---
+
+Calling a Runar contract means constructing a transaction that spends a contract UTXO by satisfying its locking script conditions. The SDK abstracts this into a familiar method-call interface.
+
+## How Contract Calls Work on BSV
+
+On BSV, "calling" a contract means **spending** its UTXO. The contract's locking script defines the conditions that must be satisfied, and the caller provides an unlocking script that satisfies those conditions.
+
+A contract call transaction has:
+- **Input:** The contract UTXO being spent, with an unlocking script that pushes the method arguments.
+- **Outputs:** Zero or more outputs depending on the contract. A stateless contract like P2PKH sends funds to a new address. A stateful contract creates a continuation UTXO with updated state.
+
+The SDK builds this transaction automatically when you call `contract.call()`.
+
+## Basic Call: Stateless Contract
+
+For a stateless contract like P2PKH, calling `unlock` spends the UTXO and sends the funds to a specified address:
+
+```typescript
+import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import artifact from './artifacts/P2PKH.json';
+
+// Reconnect to a deployed contract
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('cN3L4FfPtE7WjknM...');
+
+const contract = await RunarContract.fromTxId(
+  artifact,
+  'a1b2c3d4e5f6...', // deployment txid
+  0,
+  provider,
+);
+contract.connect(provider, signer);
+
+// Call the unlock method
+const result = await contract.call('unlock', {
+  sig: signer,     // SDK auto-signs with this signer
+  pubKey: signer.publicKey,
+}, {
+  outputs: [
+    { address: 'mxRecipientAddress...', satoshis: 9500 },
+  ],
+});
+
+console.log(result);
+// {
+//   txid: 'f6e5d4c3b2a1...',
+//   success: true,
+//   fee: 226,
+// }
+```
+
+### The call() Method Signature
+
+```typescript
+contract.call(
+  methodName: string,
+  args: Record<string, any>,
+  options?: CallOptions,
+): Promise<CallResult>
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `methodName` | `string` | The name of the public method to call, as defined in the contract |
+| `args` | `Record<string, any>` | Method arguments keyed by parameter name |
+| `options` | `CallOptions` | Optional configuration for the transaction |
+
+**CallOptions:**
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `outputs` | `Output[]` | `[]` | Additional outputs to include in the transaction |
+| `feeRate` | `number` | `0.5` | Fee rate in satoshis per byte |
+| `fundingUtxos` | `UTXO[]` | auto-selected | UTXOs to fund the transaction (for adding extra inputs) |
+| `changeAddress` | `string` | signer's address | Address for change output |
+
+**CallResult:**
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `txid` | `string` | Transaction ID of the spending transaction |
+| `success` | `boolean` | Whether the transaction was accepted by the network |
+| `fee` | `number` | Actual fee paid in satoshis |
+
+## Passing Arguments
+
+Method arguments are passed as a record keyed by parameter name. The SDK validates argument names and types against the contract's ABI.
+
+### Signature Arguments
+
+For parameters of type `Sig`, you can pass a `Signer` object instead of a raw signature. The SDK will compute the correct sighash and call the signer to produce the signature:
+
+```typescript
+const result = await contract.call('unlock', {
+  sig: signer,               // Signer object, not a raw signature
+  pubKey: signer.publicKey,  // Hex-encoded public key
+});
+```
+
+This is the recommended approach because the sighash depends on the full transaction, which is not known until the transaction is built. The SDK builds the transaction, computes the sighash for each input, and then calls the signer.
+
+### Preimage Arguments
+
+For stateful contracts that use `SigHashPreimage`, the SDK computes the preimage automatically:
+
+```typescript
+const result = await contract.call('increment', {
+  preimage: 'auto',  // SDK computes the preimage
+});
+```
+
+When you pass `'auto'` for a `SigHashPreimage` parameter, the SDK:
+1. Builds the transaction with all outputs.
+2. Computes the sighash preimage for the contract input.
+3. Inserts the preimage into the unlocking script.
+
+### Other Argument Types
+
+| Type | How to Pass | Example |
+| ---- | ----------- | ------- |
+| `PubKey` | Hex string | `"02a1b2c3..."` |
+| `Ripemd160` | Hex string (20 bytes) | `"89abcdef..."` |
+| `Sha256` | Hex string (32 bytes) | `"2cf24dba..."` |
+| `ByteString` | Hex string | `"deadbeef"` |
+| `bigint` | BigInt or number | `42n` or `42` |
+| `boolean` | Boolean | `true` |
+
+## Multi-Method Contracts
+
+Contracts with multiple public methods use a dispatch table in the compiled script. The SDK handles the dispatch automatically -- you just call the method by name.
+
+```typescript
+// A contract with two methods: transfer and burn
+const result = await contract.call('transfer', {
+  sig: signer,
+  pubKey: signer.publicKey,
+  newOwnerPubKeyHash: '1234abcd...',
+});
+
+// Or call the other method
+const burnResult = await contract.call('burn', {
+  sig: signer,
+  pubKey: signer.publicKey,
+});
+```
+
+Under the hood, the SDK pushes the method index onto the stack before the method arguments. The dispatch table in the locking script reads this index and branches to the correct method body.
+
+The method index is determined by the order of methods in the artifact's `abi.methods` array. The SDK looks up the method name, finds its index, and pushes it as part of the unlocking script.
+
+## Building Unlocking Scripts Manually
+
+For advanced use cases, you can build the unlocking script without broadcasting:
+
+```typescript
+const unlockingScript = contract.buildUnlockingScript('unlock', {
+  sig: rawSignatureHex,
+  pubKey: publicKeyHex,
+});
+
+console.log(unlockingScript);
+// Hex-encoded unlocking script: "<sig> <pubKey>"
+```
+
+This is useful when you are constructing transactions manually or integrating with external transaction builders.
+
+### Transaction Construction with buildCallTransaction
+
+For full control over the spending transaction:
+
+```typescript
+import { buildCallTransaction, selectUtxos } from 'runar-sdk';
+
+const tx = buildCallTransaction(contract, 'unlock', {
+  sig: signer,
+  pubKey: signer.publicKey,
+}, {
+  outputs: [
+    { address: 'mxRecipient...', satoshis: 9500 },
+  ],
+});
+
+// Inspect before signing
+console.log('Inputs:', tx.inputs.length);
+console.log('Outputs:', tx.outputs.length);
+
+// Sign and broadcast
+const signedTx = await signer.signTransaction(tx);
+const txid = await provider.broadcast(signedTx.toHex());
+```
+
+## Calling Stateful Contracts
+
+Stateful contracts require special handling because the spending transaction must create a continuation output. See [Inductive Contracts](/docs/en/sdk/inductive-contracts) for the full guide. Here is a brief example:
+
+```typescript
+// Increment a Counter contract
+const result = await contract.call('increment', {
+  preimage: 'auto',
+}, {
+  outputs: 'auto', // SDK builds continuation output from contract logic
+});
+
+// The contract's state is now updated
+console.log(contract.state);
+// { count: 1n }
+
+// The contract now points to the new UTXO
+console.log(contract.txid);    // new txid
+console.log(contract.outputIndex); // 0
+```
+
+When `outputs: 'auto'` is specified for a stateful contract, the SDK:
+1. Evaluates the contract's `addOutput()` calls to determine what outputs the contract requires.
+2. Builds those outputs into the transaction.
+3. Computes the sighash preimage that covers these outputs.
+4. Inserts the preimage into the unlocking script.
+5. After broadcast, updates the contract instance to point to the new UTXO.
+
+## Error Handling
+
+### Script Execution Failure
+
+If the unlocking script does not satisfy the locking script conditions, the BSV node rejects the transaction:
+
+```typescript
+try {
+  const result = await contract.call('unlock', {
+    sig: wrongSigner,
+    pubKey: wrongSigner.publicKey,
+  });
+} catch (error) {
+  console.log(error.message);
+  // "Script execution failed: OP_EQUALVERIFY failed at position 5"
+}
+```
+
+### Argument Validation
+
+The SDK validates arguments against the ABI before building the transaction:
+
+```typescript
+try {
+  const result = await contract.call('unlock', {
+    sig: signer,
+    // Missing pubKey argument
+  });
+} catch (error) {
+  console.log(error.message);
+  // "Missing required argument 'pubKey' for method 'unlock'"
+}
+```
+
+### Method Not Found
+
+```typescript
+try {
+  const result = await contract.call('nonexistent', {});
+} catch (error) {
+  console.log(error.message);
+  // "Method 'nonexistent' not found in contract 'P2PKH'. Available methods: unlock"
+}
+```
+
+## Reading Contract State After a Call
+
+For stateless contracts, a successful call simply spends the UTXO. The contract is "consumed" and there is nothing further to read.
+
+For stateful contracts, after a successful call, the contract instance is updated to point to the new continuation UTXO:
+
+```typescript
+// Before call
+console.log(contract.state);  // { count: 0n }
+console.log(contract.txid);   // 'a1b2c3...' (deploy tx)
+
+await contract.call('increment', { preimage: 'auto' }, { outputs: 'auto' });
+
+// After call
+console.log(contract.state);  // { count: 1n }
+console.log(contract.txid);   // 'f6e5d4...' (new tx)
+```
+
+## What's Next
+
+- [Inductive Contracts](/docs/en/sdk/inductive-contracts) -- In-depth guide to stateful contract interactions
+- [Token Contracts](/docs/en/sdk/token-contracts) -- Calling token transfer and merge methods
+- [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- Understanding fees in call transactions

@@ -1,0 +1,136 @@
+---
+title: "How the Compiler Works"
+description: "Architecture and design of the Runar compiler."
+section: "compiler"
+order: 10
+lang: "en"
+---
+
+The Runar compiler transforms high-level contract code from multiple source languages into optimized Bitcoin Script. This page provides an architectural overview of the compiler's design and the key decisions behind it.
+
+## Why a Nanopass Architecture
+
+Traditional compilers often use a small number of large, monolithic passes that each do many things at once. The Runar compiler takes the opposite approach: it is structured as a **6-pass nanopass pipeline** where each pass has a single, well-defined responsibility. This design brings several advantages.
+
+**Auditability.** Because each pass does exactly one thing, it is straightforward to inspect and verify. A pass that only validates syntax rules does not also need to reason about stack layout. A pass that only lowers to an intermediate representation does not also need to emit opcodes.
+
+**Testability.** Each pass can be tested in isolation. You can feed a hand-crafted AST into the type-checker without running the parser first. You can feed a hand-crafted ANF program into the stack lowering pass without running the first three passes.
+
+**Multi-language support.** The nanopass design cleanly separates the language-specific frontend (parsing) from the language-agnostic backend (everything after the AST). This means adding a new source language only requires writing a new parser -- all downstream passes are shared.
+
+**Reproducibility.** The pipeline has a clearly defined **conformance boundary** at the ANF IR stage. All four independent compiler implementations (TypeScript, Go, Rust, Python) must produce byte-identical ANF output for the same source contract. This is the foundation of Runar's cross-compiler verification guarantee.
+
+## High-Level Architecture
+
+The compiler pipeline consists of six sequential passes:
+
+```
+Source Code (TS / Go / Rust / Python)
+        |
+   [1] Parse        -- Source text to Runar AST (ContractNode)
+        |
+   [2] Validate     -- Enforce language subset rules
+        |
+   [3] Type-check   -- Verify types and consumption rules
+        |
+   [4] ANF Lower    -- AST to Administrative Normal Form IR
+        |                *** CONFORMANCE BOUNDARY ***
+   [5] Stack Lower  -- ANF IR to Stack IR (opcodes + positions)
+        |
+   [6] Emit         -- Stack IR to Bitcoin Script hex
+        |
+   Artifact JSON
+```
+
+Passes 1 through 3 operate on the `ContractNode` AST. Pass 4 produces the `ANFProgram` intermediate representation. Pass 5 produces the `StackProgram` representation. Pass 6 emits final Bitcoin Script.
+
+## Multi-Language Frontend Design
+
+The parsing pass is the only language-specific component in the entire pipeline. Each supported source language has its own parser, but all parsers produce the same `ContractNode` AST:
+
+| Source Language | Parser Technology      | Entry Point     |
+| --------------- | ---------------------- | --------------- |
+| TypeScript      | ts-morph               | 01-parse.ts     |
+| Go              | tree-sitter            | 01-parse.ts     |
+| Rust            | SWC                    | 01-parse.ts     |
+| Python          | Recursive descent      | 01-parse.ts     |
+
+The `ContractNode` AST is a language-neutral representation of a Runar contract. It captures the contract name, constructor parameters, state fields, and public methods with their parameter lists and body statements. Language-specific syntax is erased at this stage -- a TypeScript contract and a Go contract that define the same logic produce identical ASTs.
+
+This design means that the validation, type-checking, ANF lowering, stack lowering, and emission passes do not need to know which language the contract was originally written in. They operate on a single, shared data structure.
+
+## The Conformance Boundary
+
+The most important architectural decision in the Runar compiler is the **conformance boundary** at the ANF IR stage (between passes 4 and 5).
+
+Runar is implemented as four independent compilers in four different languages. These compilers are developed by different teams and use different parser technologies. But they must all produce the same Bitcoin Script for the same source contract. The conformance boundary enforces this.
+
+After pass 4, every compiler must produce **byte-identical ANF output** for a given source contract. The ANF representation is deterministic and fully specified: every sub-expression is bound to a sequential temporary (`t0`, `t1`, `t2`, ...), and the ordering is defined by a canonical traversal of the AST.
+
+This means:
+- The TypeScript compiler and the Go compiler will produce the same ANF for the same contract.
+- The ANF can be serialized, hashed, and compared across implementations.
+- If two compilers produce different ANF for the same input, at least one has a bug.
+
+Passes 5 and 6 (stack lowering and emission) are deterministic transformations of the ANF, so identical ANF guarantees identical Bitcoin Script output.
+
+## Intermediate Representation (IR)
+
+The compiler uses two intermediate representations.
+
+### ANF IR (Administrative Normal Form)
+
+ANF is a functional intermediate representation where every sub-expression is bound to a named temporary. There are no nested expressions -- every operation takes only atoms (variables or literals) as arguments.
+
+For example, given the expression `hash160(pubKey) === this.pubKeyHash`, the ANF representation is:
+
+```
+let t0 = hash160(pubKey)
+let t1 = eq(t0, this.pubKeyHash)
+```
+
+This flattened form makes it trivial to determine evaluation order and map operations to a stack machine.
+
+### Stack IR
+
+Stack IR is a low-level representation that maps ANF operations to Bitcoin Script stack operations. Each ANF temporary is resolved to a stack position, and the appropriate `OP_PICK`, `OP_ROLL`, or `OP_SWAP` instructions are inserted to bring values to the top of the stack when needed.
+
+Stack IR respects a maximum stack depth of 800 elements. When values are buried deeper than the stack can efficiently reach, the alt-stack is used as overflow storage.
+
+## Optimization Passes
+
+The compiler includes three optional optimization passes that run between the core pipeline stages:
+
+**Peephole optimizer** -- Operates on Stack IR. Applies 15 pattern-matching rules that recognize common opcode sequences and replace them with shorter equivalents. For example, `OP_SWAP OP_DROP` is replaced with `OP_NIP`, and `OP_0 OP_PICK` is replaced with `OP_DUP`.
+
+**ANF EC optimizer** -- Operates on ANF IR. Applies 12 algebraic simplification rules specific to secp256k1 elliptic curve operations. These rules recognize patterns like point addition with the identity element or scalar multiplication by one, and simplify them.
+
+**Constant folder** -- Operates on ANF IR. Evaluates constant expressions at compile time. This optimizer is disabled by default because constant folding can change the script size, which affects fee calculations and may be surprising in audit contexts. Enable it explicitly when you want smaller scripts.
+
+## Bitcoin Script Code Generation
+
+The final emission pass converts Stack IR into Bitcoin Script hex. Key behaviors of this pass include:
+
+- **Optimal push data encoding.** Data pushes use the smallest possible encoding (`OP_0` for zero, direct push for 1-75 bytes, `OP_PUSHDATA1` for 76-255 bytes, etc.).
+- **Constructor placeholders.** Constructor parameters appear as `OP_0` placeholders in the compiled script. These are filled in at deployment time by the SDK.
+- **OP_CODESEPARATOR injection.** For stateful contracts that use `OP_PUSH_TX`, the compiler injects `OP_CODESEPARATOR` at the correct position so that `OP_CHECKSIG` signs only the relevant portion of the script.
+- **Dispatch tables.** Contracts with multiple public methods get a dispatch table at the beginning of the script. The method selector (an integer pushed in the unlocking script) is used to jump to the correct method body.
+
+## Compiler Implementations
+
+Runar maintains four independent compiler implementations:
+
+| Implementation | Language   | Primary Use Case                          |
+| -------------- | ---------- | ----------------------------------------- |
+| runar-compiler | TypeScript | Reference implementation, CLI, SDK        |
+| runar-go       | Go         | High-performance server-side compilation  |
+| runar-rs       | Rust       | Embedded and WASM compilation             |
+| runar-py       | Python     | Research, prototyping, Jupyter notebooks  |
+
+All four implementations share the same test suite of conformance vectors. A conformance vector is a pair of (source contract, expected ANF output). Any implementation that passes all conformance vectors is guaranteed to produce identical Bitcoin Script.
+
+## What's Next
+
+- [Compilation Pipeline](/docs/en/compiler/compilation-pipeline) -- Detailed walkthrough of each pass with concrete examples
+- [Configuration](/docs/en/compiler/configuration) -- Compiler options, CLI flags, and optimizer settings
+- [Output Artifacts](/docs/en/compiler/output-artifacts) -- Understanding the compiled artifact format

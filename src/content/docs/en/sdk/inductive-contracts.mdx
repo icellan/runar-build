@@ -1,0 +1,283 @@
+---
+title: "Inductive (Stateful) Contracts"
+description: "Building state machines with UTXOs."
+section: "sdk"
+order: 40
+lang: "en"
+---
+
+Inductive contracts maintain state across multiple transactions by enforcing that each spend creates a new UTXO with an updated state. This pattern turns a chain of UTXOs into an on-chain state machine.
+
+## What Makes a Contract Inductive
+
+A standard (stateless) contract is a one-shot lock: once its UTXO is spent, the contract is gone. An inductive (stateful) contract enforces that the spending transaction creates a **continuation output** -- a new UTXO locked by the same contract script but with updated state.
+
+This creates a chain of UTXOs:
+
+```
+Deploy TX         Call TX #1         Call TX #2
+ [Counter          [Counter           [Counter
+  count=0]   -->    count=1]   -->     count=2]   --> ...
+```
+
+Each UTXO in the chain carries the full contract logic plus serialized state. The contract itself verifies that the output of the spending transaction is correctly formed -- this is the **covenant** property.
+
+In Runar, inductive contracts extend `StatefulSmartContract` instead of `SmartContract`:
+
+```typescript
+import {
+  StatefulSmartContract,
+  assert,
+  SigHashPreimage,
+} from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor() {
+    super();
+    this.count = 0n;
+  }
+
+  public increment(preimage: SigHashPreimage) {
+    this.count = this.count + 1n;
+    this.addOutput(this.ctx.utxo.satoshis, this.count);
+    assert(this.checkPreimage(preimage));
+  }
+}
+```
+
+## The OP_PUSH_TX Mechanism
+
+The key question for stateful contracts is: how does a locking script (which runs in the spending transaction's context) verify properties of the spending transaction itself?
+
+Runar uses **OP_PUSH_TX** -- a technique where the contract verifies a sighash preimage that commits to the spending transaction's outputs. Here is how it works:
+
+1. The unlocking script pushes a **sighash preimage** onto the stack. This preimage contains the serialized outputs of the spending transaction (among other fields).
+2. The locking script computes the expected sighash from this preimage.
+3. The locking script calls `OP_CHECKSIG` with a known public key (`G`, the secp256k1 generator point) and `k=1` (a deterministic nonce). Because `k=1` and the public key is `G`, anyone can compute the corresponding signature -- the "signing" is not for authentication but for hashing.
+4. If `OP_CHECKSIG` succeeds, it proves that the preimage accurately represents the spending transaction. The contract can then parse the preimage to inspect the transaction's outputs.
+
+The compiler automatically injects the OP_PUSH_TX verification code at the entry of every public method in a `StatefulSmartContract`. You do not write this code yourself -- just call `this.checkPreimage(preimage)` and the compiler handles the rest.
+
+## State Serialization
+
+Contract state is serialized at the end of the locking script, after an `OP_RETURN` marker. The state bytes do not affect script execution -- they are inert data.
+
+The locking script structure for a stateful contract is:
+
+```
+[contract logic] [OP_RETURN] [serialized state]
+```
+
+### Serialization Format
+
+State fields are serialized in the order they appear in the contract class, using a length-prefixed encoding:
+
+| Type | Encoding |
+| ---- | -------- |
+| `bigint` | Minimal Script number encoding (variable length) + 1-byte length prefix |
+| `boolean` | `OP_TRUE` (0x01) or `OP_FALSE` (0x00) |
+| `ByteString` | Raw bytes + varint length prefix |
+| `Ripemd160` | 20 bytes (fixed length, no prefix) |
+| `Sha256` | 32 bytes (fixed length, no prefix) |
+| `PubKey` | 33 bytes (compressed, fixed length, no prefix) |
+
+The SDK's `serializeState()` and `deserializeState()` functions handle this encoding:
+
+```typescript
+import { serializeState, deserializeState } from 'runar-sdk';
+
+const stateBytes = serializeState(
+  { count: 5n },
+  [{ name: 'count', type: 'bigint' }],
+);
+// stateBytes: "0105" (1-byte length prefix + value 5)
+
+const state = deserializeState(
+  stateBytes,
+  [{ name: 'count', type: 'bigint' }],
+);
+// state: { count: 5n }
+```
+
+## Using addOutput() and addRawOutput()
+
+Inside a stateful contract method, you use `this.addOutput()` to create the continuation output:
+
+```typescript
+public increment(preimage: SigHashPreimage) {
+  this.count = this.count + 1n;
+  this.addOutput(this.ctx.utxo.satoshis, this.count);
+  assert(this.checkPreimage(preimage));
+}
+```
+
+**`this.addOutput(satoshis, ...stateValues)`** creates a continuation UTXO locked by the same contract script with updated state values. The contract verifies that the spending transaction actually contains this output.
+
+- The first argument is the satoshi amount for the continuation output.
+- The remaining arguments are the new state values, in the same order as the state fields.
+
+**`this.addRawOutput(script, satoshis)`** creates an arbitrary output. This is useful for sending funds to other addresses as part of the state transition:
+
+```typescript
+public withdraw(amount: bigint, recipientPubKeyHash: Ripemd160, preimage: SigHashPreimage) {
+  assert(this.balance >= amount);
+  this.balance = this.balance - amount;
+
+  // Continuation output with updated balance
+  this.addOutput(this.ctx.utxo.satoshis - amount, this.balance);
+
+  // Payment output to recipient
+  const p2pkhScript = buildP2PKH(recipientPubKeyHash);
+  this.addRawOutput(p2pkhScript, amount);
+
+  assert(this.checkPreimage(preimage));
+}
+```
+
+The compiler counts all `addOutput()` and `addRawOutput()` calls and encodes the expected output structure into the preimage verification. If the spending transaction's outputs do not match exactly, the preimage check fails and the transaction is rejected.
+
+## Counter Example: Deploy and Call
+
+Here is a complete end-to-end example of deploying a Counter contract and calling it multiple times.
+
+### The Contract
+
+```typescript
+import { StatefulSmartContract, assert, SigHashPreimage } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor() {
+    super();
+    this.count = 0n;
+  }
+
+  public increment(preimage: SigHashPreimage) {
+    this.count = this.count + 1n;
+    this.addOutput(this.ctx.utxo.satoshis, this.count);
+    assert(this.checkPreimage(preimage));
+  }
+}
+
+export { Counter };
+```
+
+### Compile
+
+```bash
+runar compile contracts/Counter.runar.ts --output ./artifacts
+```
+
+### Deploy
+
+```typescript
+import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import counterArtifact from './artifacts/Counter.json';
+
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('cN3L4FfPtE7WjknM...');
+
+const counter = new RunarContract(counterArtifact);
+counter.setState({ count: 0n });
+counter.connect(provider, signer);
+
+const deployResult = await counter.deploy({ satoshis: 10000 });
+console.log('Deployed:', deployResult.txid);
+console.log('State:', counter.state); // { count: 0n }
+```
+
+### Call increment() Three Times
+
+```typescript
+// First increment: count 0 -> 1
+await counter.call('increment', { preimage: 'auto' }, { outputs: 'auto' });
+console.log('After 1st call:', counter.state); // { count: 1n }
+console.log('UTXO:', counter.txid, counter.outputIndex);
+
+// Second increment: count 1 -> 2
+await counter.call('increment', { preimage: 'auto' }, { outputs: 'auto' });
+console.log('After 2nd call:', counter.state); // { count: 2n }
+
+// Third increment: count 2 -> 3
+await counter.call('increment', { preimage: 'auto' }, { outputs: 'auto' });
+console.log('After 3rd call:', counter.state); // { count: 3n }
+```
+
+Each call creates a new transaction that spends the previous UTXO and creates a new one. The SDK tracks the chain automatically:
+
+```
+Deploy TX (count=0)
+   --> TX #1 (count=1)
+      --> TX #2 (count=2)
+         --> TX #3 (count=3)
+```
+
+After each call, `counter.txid` and `counter.outputIndex` are updated to point to the latest UTXO.
+
+## Extracting State from an Existing UTXO
+
+If you need to read the current state of a stateful contract without modifying it, use `extractStateFromScript()`:
+
+```typescript
+import { extractStateFromScript } from 'runar-sdk';
+
+const output = await provider.getOutput(txid, 0);
+const state = extractStateFromScript(
+  output.script,
+  counterArtifact.stateFields,
+);
+
+console.log(state); // { count: 3n }
+```
+
+Or use `RunarContract.fromTxId()` which does this automatically:
+
+```typescript
+const counter = await RunarContract.fromTxId(
+  counterArtifact,
+  'latest-txid...',
+  0,
+  provider,
+);
+
+console.log(counter.state); // { count: 3n }
+```
+
+## Practical Considerations
+
+### Fees and Satoshi Balance
+
+Each state transition costs a mining fee. The satoshis locked in the continuation output decrease slightly with each call (to pay the fee). Plan for enough initial satoshis to cover many state transitions:
+
+```typescript
+// Deploy with enough satoshis for ~100 state transitions at ~200 sat fee each
+await counter.deploy({ satoshis: 30000 });
+```
+
+If the continuation output's satoshi amount gets too low to pay the next fee, you can add a funding input to the call transaction:
+
+```typescript
+const result = await counter.call('increment', {
+  preimage: 'auto',
+}, {
+  outputs: 'auto',
+  fundingUtxos: [additionalUtxo], // extra input to cover fees
+});
+```
+
+### Maximum State Size
+
+State is serialized in the locking script, which is stored on-chain. Keeping state compact reduces transaction size and fees. The practical limit is determined by the maximum script size (currently ~4 GB on BSV, though practical limits are much lower).
+
+### Concurrent Spending Attempts
+
+Because UTXOs can only be spent once, two parties cannot call the same stateful contract simultaneously. The first valid spending transaction wins, and the second will fail with a "txn-mempool-conflict" error. Applications that need concurrent access should use patterns like sharded state or batched updates.
+
+## What's Next
+
+- [Token Contracts](/docs/en/sdk/token-contracts) -- Tokens are built on the inductive contract pattern
+- [Calling a Contract](/docs/en/sdk/calling) -- General contract calling guide
+- [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- Managing fees in state transition chains

@@ -1,0 +1,236 @@
+---
+title: "Deploying a Contract"
+description: "How to deploy compiled contracts to BSV."
+section: "sdk"
+order: 20
+lang: "en"
+---
+
+Deploying a Runar contract means broadcasting a transaction that locks funds into a UTXO governed by your compiled Bitcoin Script. This page walks through the deployment process step by step.
+
+## Deployment Conceptually
+
+A deployment transaction is a standard BSV transaction with one special output: the locking script is your compiled contract. The transaction spends one or more funding UTXOs (regular P2PKH outputs that you control) and creates:
+
+1. **The contract output** -- Locked by your compiled Bitcoin Script with constructor arguments embedded.
+2. **A change output** -- Returns excess funds to your address.
+
+After the transaction is broadcast and confirmed, the contract UTXO exists on-chain and can be spent by anyone who can satisfy its conditions.
+
+## Step 1: Compile the Contract
+
+Start by compiling your contract to produce an artifact:
+
+```bash
+runar compile contracts/P2PKH.runar.ts --output ./artifacts
+```
+
+This produces `artifacts/P2PKH.json`. See [Output Artifacts](/docs/en/compiler/output-artifacts) for a detailed explanation of the artifact format.
+
+## Step 2: Create a RunarContract Instance
+
+Load the artifact and provide constructor arguments:
+
+```typescript
+import { RunarContract } from 'runar-sdk';
+import artifact from './artifacts/P2PKH.json';
+
+const contract = new RunarContract(artifact, {
+  pubKeyHash: '89abcdef01234567890abcdef01234567890abcd',
+});
+```
+
+### How Constructor Arguments Work
+
+The compiled script in the artifact contains `OP_0` placeholders at the positions where constructor parameters belong. The artifact's `constructorSlots` field tells the SDK exactly where each placeholder is and how many bytes it expects.
+
+When you create a `RunarContract` instance:
+
+1. The SDK reads the `constructorSlots` array from the artifact.
+2. For each slot, it takes the corresponding constructor argument you provided.
+3. It serializes the argument to the expected byte length (e.g., a `Ripemd160` is 20 bytes).
+4. It splices the serialized bytes into the script at the recorded byte offset.
+
+The result is a fully resolved locking script with no placeholders. You can inspect it:
+
+```typescript
+const lockingScript = contract.getLockingScript();
+console.log(lockingScript);
+// "76a91489abcdef01234567890abcdef01234567890abcd88ac"
+```
+
+### Contracts Without Constructor Arguments
+
+Some contracts have no constructor parameters (e.g., a stateful Counter that starts at zero). In that case, omit the second argument:
+
+```typescript
+const counter = new RunarContract(counterArtifact);
+```
+
+## Step 3: Set Up Provider and Signer
+
+The provider connects to the BSV network and the signer produces signatures for your funding inputs.
+
+```typescript
+import { WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('cN3L4FfPtE7WjknM...'); // WIF private key
+
+contract.connect(provider, signer);
+```
+
+The `connect()` method stores the provider and signer on the contract instance so you do not need to pass them to every subsequent method call.
+
+### Provider Options
+
+| Provider | Use Case |
+| -------- | -------- |
+| `WhatsOnChainProvider('mainnet')` | Production deployment |
+| `WhatsOnChainProvider('testnet')` | Testing with real transactions |
+| `RPCProvider({ host, port, ... })` | Local regtest node |
+| `MockProvider()` | Unit tests (no real broadcast) |
+
+### Signer Options
+
+| Signer | Use Case |
+| ------ | -------- |
+| `LocalSigner(wif)` | Server-side, testing |
+| `ExternalSigner(callback)` | HSM, hardware wallet |
+| `WalletSigner(walletApi)` | Browser wallet extension |
+
+## Step 4: Deploy
+
+Call `deploy()` to build, sign, and broadcast the deployment transaction:
+
+```typescript
+const deployResult = await contract.deploy({ satoshis: 10000 });
+
+console.log(deployResult);
+// {
+//   txid: 'a1b2c3d4e5f6...',
+//   outputIndex: 0,
+//   satoshis: 10000,
+//   script: '76a91489abcdef...88ac',
+//   fee: 226,
+// }
+```
+
+### Deploy Options
+
+| Option | Type | Default | Description |
+| ------ | ---- | ------- | ----------- |
+| `satoshis` | `number` | required | Amount of satoshis to lock in the contract output |
+| `feeRate` | `number` | `0.5` | Fee rate in satoshis per byte |
+| `fundingUtxos` | `UTXO[]` | auto-selected | Specific UTXOs to use for funding (optional) |
+| `changeAddress` | `string` | signer's address | Address for the change output |
+
+### What Happens During deploy()
+
+1. **Fetch funding UTXOs.** The SDK calls `provider.getUtxos(signer.address)` to find unspent outputs controlled by the signer. If `fundingUtxos` is provided, those are used instead.
+2. **Select UTXOs.** The SDK's `selectUtxos()` function picks enough UTXOs to cover the contract amount plus the estimated fee.
+3. **Build the transaction.** A new transaction is constructed with:
+   - **Inputs:** The selected funding UTXOs.
+   - **Output 0:** The contract locking script with the specified satoshis.
+   - **Output 1:** A P2PKH change output returning excess funds to the change address.
+4. **Sign the inputs.** Each funding input is signed by the signer.
+5. **Broadcast.** The signed transaction hex is sent to the network via `provider.broadcast()`.
+6. **Update contract state.** The contract instance records the deployment `txid` and `outputIndex` so it knows where the UTXO lives on-chain.
+
+### Verifying Deployment
+
+After deployment, verify the transaction exists on-chain:
+
+```typescript
+const tx = await provider.getTx(deployResult.txid);
+console.log(tx.confirmations); // 0 initially, then 1+ after a block
+```
+
+For testnet deployments, you can view the transaction on a block explorer:
+
+```
+https://test.whatsonchain.com/tx/a1b2c3d4e5f6...
+```
+
+## Deploying Stateful Contracts
+
+Stateful contracts (those extending `StatefulSmartContract`) are deployed the same way, but the locking script includes serialized initial state at the end.
+
+```typescript
+import counterArtifact from './artifacts/Counter.json';
+
+const counter = new RunarContract(counterArtifact);
+counter.setState({ count: 0n });
+
+counter.connect(provider, signer);
+const result = await counter.deploy({ satoshis: 10000 });
+```
+
+The `setState()` call sets the initial state. During deployment, the SDK serializes this state and appends it to the locking script. The resulting script looks like:
+
+```
+[contract logic] [OP_RETURN] [serialized state]
+```
+
+The state is placed after `OP_RETURN` so it does not affect script execution -- it is just data carried in the output.
+
+## Reconnecting After Deployment
+
+If your application restarts after deploying a contract, you need to reconnect to the existing UTXO rather than deploying again. Use `RunarContract.fromTxId()`:
+
+```typescript
+const contract = await RunarContract.fromTxId(
+  artifact,
+  'a1b2c3d4e5f6...', // the deployment txid
+  0,                   // output index
+  provider,
+);
+
+contract.connect(provider, signer);
+```
+
+This fetches the transaction from the network, reads the locking script from the specified output, and reconstructs the contract instance. For stateful contracts, it also deserializes the current state from the script.
+
+## Deployment with Pre-Built Transactions
+
+For advanced use cases where you need full control over the transaction, use the `buildDeployTransaction()` utility:
+
+```typescript
+import { buildDeployTransaction, selectUtxos } from 'runar-sdk';
+
+const utxos = await provider.getUtxos(signer.address);
+const selected = selectUtxos(utxos, 10000 + 300); // amount + estimated fee
+
+const tx = buildDeployTransaction(contract, selected, {
+  satoshis: 10000,
+  changeAddress: signer.address,
+});
+
+// Inspect the transaction before signing
+console.log(tx.inputs.length);  // number of funding inputs
+console.log(tx.outputs.length); // 2 (contract + change)
+
+// Sign and broadcast manually
+const signedTx = await signer.signTransaction(tx);
+const txid = await provider.broadcast(signedTx.toHex());
+```
+
+This gives you the ability to inspect, modify, or audit the transaction before it is broadcast.
+
+## Handling Deployment Errors
+
+Common deployment errors and how to resolve them:
+
+| Error | Cause | Resolution |
+| ----- | ----- | ---------- |
+| `Insufficient funds` | Signer's UTXOs do not cover amount + fee | Fund the address or reduce satoshis |
+| `Missing constructor argument` | A required constructor arg was not provided | Check the artifact's ABI and provide all params |
+| `Broadcast failed: txn-mempool-conflict` | A UTXO was already spent | Refresh UTXOs and retry |
+| `Broadcast failed: dust` | Output amount is below dust threshold (546 sat) | Increase satoshis to at least 546 |
+| `Invalid script` | Constructor argument has wrong format/length | Verify argument types match the ABI |
+
+## What's Next
+
+- [Calling a Contract](/docs/en/sdk/calling) -- How to spend the deployed contract UTXO
+- [Inductive Contracts](/docs/en/sdk/inductive-contracts) -- Deploying and interacting with stateful contracts
+- [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- Understanding fee estimation and UTXO selection

@@ -1,0 +1,309 @@
+---
+title: "Output Artifacts"
+description: "Understanding compiler output files."
+section: "compiler"
+order: 40
+lang: "en"
+---
+
+After compilation, Runar produces a JSON artifact file that contains everything needed to deploy and interact with the contract. This page explains the artifact format in detail.
+
+## Artifact File Overview
+
+Each compiled contract produces a single JSON file in the output directory. The file is named after the contract class (for example, `P2PKH.json` for a contract named `P2PKH`).
+
+The artifact is self-contained. It includes the compiled Bitcoin Script, the contract ABI, source maps, and metadata. The SDK reads this artifact to deploy contracts, build transactions, and generate TypeScript bindings.
+
+## Complete Artifact Structure
+
+Here is the full structure of an artifact file with every field documented:
+
+```json
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "P2PKH",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "pubKeyHash", "type": "Ripemd160" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "unlock",
+        "params": [
+          { "name": "sig", "type": "Sig" },
+          { "name": "pubKey", "type": "PubKey" }
+        ]
+      }
+    ]
+  },
+  "script": "76a914OP_0_PLACEHOLDER_0088ac",
+  "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
+  "sourceMap": {
+    "file": "P2PKH.runar.ts",
+    "mappings": [
+      { "opcodeOffset": 0, "line": 12, "column": 4 },
+      { "opcodeOffset": 1, "line": 12, "column": 4 },
+      { "opcodeOffset": 3, "line": 12, "column": 25 },
+      { "opcodeOffset": 5, "line": 13, "column": 4 }
+    ]
+  },
+  "ir": {
+    "methods": [
+      {
+        "name": "unlock",
+        "body": [
+          "let t0 = hash160(pubKey)",
+          "let t1 = eq(t0, this.pubKeyHash)",
+          "assert(t1)",
+          "let t2 = checkSig(sig, pubKey)",
+          "assert(t2)"
+        ]
+      }
+    ]
+  },
+  "stateFields": [],
+  "constructorSlots": [
+    {
+      "name": "pubKeyHash",
+      "type": "Ripemd160",
+      "byteOffset": 3,
+      "byteLength": 20
+    }
+  ],
+  "buildTimestamp": "2026-03-15T10:30:00Z"
+}
+```
+
+## Field Reference
+
+### Top-Level Fields
+
+**`version`** (string) -- The artifact format version. Currently `"runar-v0.1.0"`. This allows the SDK to handle backward compatibility as the format evolves.
+
+**`compilerVersion`** (string) -- The version of the Runar compiler that produced this artifact. Useful for reproducing builds and debugging version-specific issues.
+
+**`contractName`** (string) -- The name of the contract class as declared in the source code. Used by the SDK to identify the contract and by code generation tools to name TypeScript bindings.
+
+**`buildTimestamp`** (string, ISO 8601) -- When the artifact was compiled. Informational only -- not used by the SDK at runtime.
+
+### ABI (Application Binary Interface)
+
+The `abi` field describes the contract's interface -- its constructor parameters and public methods. The SDK uses this to validate arguments at runtime and to generate TypeScript type definitions.
+
+**`abi.constructor.params`** (array) -- Constructor parameters. Each entry has:
+- `name` (string) -- Parameter name.
+- `type` (string) -- Runar type (`Ripemd160`, `PubKey`, `ByteString`, `bigint`, `boolean`).
+
+**`abi.methods`** (array) -- Public methods. Each entry has:
+- `name` (string) -- Method name.
+- `params` (array) -- Method parameters, same format as constructor params.
+
+For contracts with multiple public methods, the methods array contains all of them. The method index in this array corresponds to the dispatch table index in the compiled script.
+
+### Script and Assembly
+
+**`script`** (string) -- The compiled Bitcoin Script as a hex string. Constructor parameter positions contain `OP_0` placeholders (represented as `OP_0_PLACEHOLDER_XX` where `XX` is the slot index). The SDK replaces these placeholders with actual values at deployment time.
+
+**`asm`** (string, optional) -- Human-readable Bitcoin Script assembly. Only included when the `--asm` flag is used or `includeASM` is set in the config. Constructor parameters appear as `<paramName>` placeholders.
+
+The assembly format is useful for debugging and auditing. Each opcode is separated by a space, and data pushes show the placeholder name in angle brackets.
+
+### Source Map
+
+**`sourceMap`** (object) -- Maps compiled opcodes back to source code positions. Used by debugging tools to show which line of source code produced a given opcode.
+
+**`sourceMap.file`** (string) -- The source file name.
+
+**`sourceMap.mappings`** (array) -- Each entry maps an opcode offset to a source position:
+- `opcodeOffset` (number) -- Byte offset in the compiled script.
+- `line` (number) -- Source line number (1-based).
+- `column` (number) -- Source column number (0-based).
+
+The source map enables the Runar debugger to step through Bitcoin Script execution while showing the corresponding source code.
+
+### Intermediate Representation
+
+**`ir`** (object, optional) -- The ANF intermediate representation. Only included when the `--ir` flag is used or `includeIR` is set in the config.
+
+**`ir.methods`** (array) -- Each method's ANF as an array of string-formatted instructions. This is the exact representation that serves as the conformance boundary across compiler implementations.
+
+Including the IR in the artifact enables cross-compiler verification: you can compile the same contract with the TypeScript and Go compilers, and compare the `ir` fields to confirm they match.
+
+### State Fields
+
+**`stateFields`** (array) -- For stateful contracts (`StatefulSmartContract`), this lists the state fields that are serialized at the end of the locking script.
+
+Each entry has:
+- `name` (string) -- Field name.
+- `type` (string) -- Runar type.
+
+For stateless contracts (`SmartContract`), this array is empty.
+
+Example for a `Counter` contract:
+
+```json
+"stateFields": [
+  { "name": "count", "type": "bigint" }
+]
+```
+
+### Constructor Slots
+
+**`constructorSlots`** (array) -- Describes where constructor parameter placeholders appear in the compiled script. The SDK uses this information to splice actual values into the script at deployment time.
+
+Each entry has:
+- `name` (string) -- Parameter name (matches `abi.constructor.params`).
+- `type` (string) -- Parameter type.
+- `byteOffset` (number) -- Byte position in the hex script where the placeholder starts.
+- `byteLength` (number) -- Expected byte length of the parameter value.
+
+The SDK reads the `constructorSlots` array, takes the constructor arguments provided by the user, serializes each argument to the correct byte length, and replaces the placeholder bytes in the script.
+
+## Example: Complete P2PKH Artifact
+
+Here is a real-world artifact for a P2PKH contract, with the `--ir` and `--asm` flags both enabled:
+
+```json
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "P2PKH",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "pubKeyHash", "type": "Ripemd160" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "unlock",
+        "params": [
+          { "name": "sig", "type": "Sig" },
+          { "name": "pubKey", "type": "PubKey" }
+        ]
+      }
+    ]
+  },
+  "script": "76a91400000000000000000000000000000000000000008888ac",
+  "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
+  "sourceMap": {
+    "file": "P2PKH.runar.ts",
+    "mappings": [
+      { "opcodeOffset": 0, "line": 12, "column": 4 },
+      { "opcodeOffset": 1, "line": 12, "column": 4 },
+      { "opcodeOffset": 3, "line": 12, "column": 25 },
+      { "opcodeOffset": 24, "line": 13, "column": 4 }
+    ]
+  },
+  "ir": {
+    "methods": [
+      {
+        "name": "unlock",
+        "body": [
+          "let t0 = hash160(pubKey)",
+          "let t1 = eq(t0, this.pubKeyHash)",
+          "assert(t1)",
+          "let t2 = checkSig(sig, pubKey)",
+          "assert(t2)"
+        ]
+      }
+    ]
+  },
+  "stateFields": [],
+  "constructorSlots": [
+    {
+      "name": "pubKeyHash",
+      "type": "Ripemd160",
+      "byteOffset": 3,
+      "byteLength": 20
+    }
+  ],
+  "buildTimestamp": "2026-03-15T10:30:00Z"
+}
+```
+
+The 20 zero bytes at offset 3 in the script (`0000000000000000000000000000000000000000`) are the placeholder for the `pubKeyHash` constructor argument. At deployment time, the SDK replaces these bytes with the actual RIPEMD-160 hash of the recipient's public key.
+
+## Example: Stateful Counter Artifact
+
+For a stateful `Counter` contract that extends `StatefulSmartContract`, the artifact includes non-empty `stateFields` and additional script machinery:
+
+```json
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "Counter",
+  "abi": {
+    "constructor": {
+      "params": []
+    },
+    "methods": [
+      {
+        "name": "increment",
+        "params": [
+          { "name": "preimage", "type": "SigHashPreimage" }
+        ]
+      }
+    ]
+  },
+  "script": "...",
+  "stateFields": [
+    { "name": "count", "type": "bigint" }
+  ],
+  "constructorSlots": [],
+  "buildTimestamp": "2026-03-15T10:31:00Z"
+}
+```
+
+Notice that `constructorSlots` is empty (the Counter has no constructor parameters) and `stateFields` contains the `count` field. The SDK uses `stateFields` to serialize and deserialize the contract's state when building continuation transactions.
+
+## Using Artifacts with the SDK
+
+The artifact JSON is the primary input to the `RunarContract` class:
+
+```typescript
+import { RunarContract } from 'runar-sdk';
+import artifact from './artifacts/P2PKH.json';
+
+const contract = new RunarContract(artifact, {
+  pubKeyHash: '89abcdef01234567890abcdef01234567890abcd',
+});
+```
+
+The SDK reads the `constructorSlots` to know where to insert the `pubKeyHash` value, reads the `abi` to validate method calls, and uses the `script` as the basis for the locking script.
+
+## Generating TypeScript Bindings
+
+The SDK includes a code generation utility that reads an artifact and produces a TypeScript file with strongly-typed method signatures:
+
+```bash
+runar codegen ./artifacts/P2PKH.json --output ./generated/P2PKH.ts
+```
+
+This produces a file like:
+
+```typescript
+import { RunarContract, Sig, PubKey, Ripemd160 } from 'runar-sdk';
+import artifact from '../artifacts/P2PKH.json';
+
+export class P2PKH extends RunarContract {
+  constructor(pubKeyHash: Ripemd160) {
+    super(artifact, { pubKeyHash });
+  }
+
+  async unlock(sig: Sig, pubKey: PubKey): Promise<CallResult> {
+    return this.call('unlock', { sig, pubKey });
+  }
+}
+```
+
+The generated bindings provide compile-time type safety when interacting with contracts from application code.
+
+## What's Next
+
+- [SDK Overview](/docs/en/sdk/overview) -- Learn how the SDK uses artifacts to deploy and call contracts
+- [Deploying a Contract](/docs/en/sdk/deploying) -- Step-by-step deployment using an artifact
+- [How the Compiler Works](/docs/en/compiler/how-it-works) -- Architecture of the compiler that produces these artifacts

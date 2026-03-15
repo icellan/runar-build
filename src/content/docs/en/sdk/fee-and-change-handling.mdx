@@ -1,0 +1,291 @@
+---
+title: "Fee & Change Handling"
+description: "Managing transaction fees and change outputs."
+section: "sdk"
+order: 60
+lang: "en"
+---
+
+Every BSV transaction requires a miner fee, and most transactions produce change outputs. The Runar SDK handles fee estimation and change management automatically, but understanding the mechanics helps you optimize costs.
+
+## How Transaction Fees Work on BSV
+
+BSV transaction fees are calculated based on **transaction size in bytes**, not on the value transferred or the complexity of the script. The fee rate is expressed in satoshis per byte.
+
+```
+fee = transactionSizeInBytes * feeRate
+```
+
+As of early 2026, the standard fee rate on BSV mainnet is **0.5 satoshis per byte** (500 satoshis per kilobyte). This is extremely low compared to other blockchains -- a typical contract deployment transaction of 250 bytes costs approximately 125 satoshis (less than a fraction of a cent).
+
+### What Contributes to Transaction Size
+
+| Component | Typical Size | Notes |
+| --------- | ------------ | ----- |
+| Transaction overhead | ~10 bytes | Version, locktime, input/output counts |
+| Each P2PKH input | ~148 bytes | Prev txid + signature + pubkey |
+| Contract input (unlocking script) | Varies | Depends on method arguments |
+| P2PKH output | ~34 bytes | Amount + script |
+| Contract output (locking script) | Varies | Depends on contract + state size |
+| Change output | ~34 bytes | Standard P2PKH output |
+
+## Automatic Fee Estimation
+
+The SDK estimates fees before building transactions. The `deploy()` and `call()` methods both estimate the fee internally.
+
+### estimateDeployFee()
+
+For deployment transactions, use `estimateDeployFee()` to calculate the expected fee before deploying:
+
+```typescript
+import { estimateDeployFee } from 'runar-sdk';
+
+const fee = estimateDeployFee(contract, 0.5); // feeRate = 0.5 sat/byte
+console.log('Estimated deploy fee:', fee, 'satoshis');
+// Estimated deploy fee: 125 satoshis
+```
+
+The function estimates the transaction size by summing:
+- Transaction overhead (10 bytes).
+- One P2PKH funding input (148 bytes).
+- The contract locking script output (variable, based on `contract.getLockingScript().length / 2`).
+- One change output (34 bytes).
+
+It then multiplies by the fee rate and rounds up.
+
+### Fee Estimation in call()
+
+When calling a contract method, the fee depends on both the unlocking script (method arguments) and any outputs created by the transaction. The SDK estimates this internally:
+
+```typescript
+// The SDK estimates the fee automatically
+const result = await contract.call('unlock', {
+  sig: signer,
+  pubKey: signer.publicKey,
+}, {
+  outputs: [
+    { address: 'mxRecipient...', satoshis: 9500 },
+  ],
+});
+
+console.log('Actual fee paid:', result.fee);
+```
+
+The fee is deducted from the contract UTXO's satoshis. If the contract UTXO does not have enough satoshis to cover both the outputs and the fee, additional funding UTXOs are needed.
+
+## UTXO Selection
+
+The `selectUtxos()` function picks UTXOs from a set to cover a target amount. It is used internally by `deploy()` and `call()`, but you can also use it directly.
+
+### How selectUtxos() Works
+
+```typescript
+import { selectUtxos } from 'runar-sdk';
+
+const allUtxos = await provider.getUtxos(signer.address);
+
+// Select UTXOs to cover 10000 satoshis (contract amount) + ~300 (estimated fee)
+const selected = selectUtxos(allUtxos, 10300);
+
+console.log('Selected:', selected.length, 'UTXOs');
+console.log('Total value:', selected.reduce((sum, u) => sum + u.satoshis, 0));
+```
+
+### Selection Algorithm
+
+The SDK uses a simple and predictable selection algorithm:
+
+1. **Sort UTXOs by value** (largest first).
+2. **Accumulate** until the total meets or exceeds the target amount.
+3. **Return** the selected set.
+
+This "largest first" strategy minimizes the number of inputs (reducing transaction size and fee), while ensuring the target is met with the fewest UTXOs possible.
+
+```typescript
+// Example: allUtxos = [50000, 30000, 10000, 5000, 1000]
+// Target: 35000
+// Selected: [50000] (one UTXO covers it)
+
+// Example: allUtxos = [20000, 15000, 10000, 5000]
+// Target: 35000
+// Selected: [20000, 15000] (two UTXOs needed)
+```
+
+### Insufficient Funds
+
+If the available UTXOs do not cover the target amount, `selectUtxos()` throws an error:
+
+```typescript
+try {
+  const selected = selectUtxos(allUtxos, 1000000);
+} catch (error) {
+  console.log(error.message);
+  // "Insufficient funds: available 50000, required 1000000"
+}
+```
+
+## Change Output Generation
+
+When the selected UTXOs exceed the target amount plus fee, the excess is returned as a **change output** -- a standard P2PKH output sent to the signer's address (or a specified change address).
+
+### Change Calculation
+
+```
+change = totalInputValue - contractAmount - fee
+```
+
+For example:
+- Selected UTXO: 50000 satoshis
+- Contract amount: 10000 satoshis
+- Fee: 125 satoshis
+- Change: 50000 - 10000 - 125 = **39875 satoshis**
+
+### Dust Threshold
+
+BSV has a **dust threshold** of 546 satoshis. Outputs below this value are considered "dust" and will be rejected by nodes. If the calculated change is below the dust threshold, the SDK does not create a change output -- the excess is donated to the miner as additional fee.
+
+```typescript
+// If change would be 400 satoshis (below dust threshold):
+// No change output is created
+// Effective fee becomes: 125 + 400 = 525 satoshis
+```
+
+This is rare in practice, but it can happen when the UTXO value closely matches the target.
+
+### Custom Change Address
+
+By default, change goes to the signer's address. You can specify a different address:
+
+```typescript
+const result = await contract.deploy({
+  satoshis: 10000,
+  changeAddress: 'mDifferentAddress...',
+});
+```
+
+## Fee Handling in Stateful Contract Chains
+
+Stateful contracts require special attention to fees because each state transition costs a fee, and the satoshis locked in the continuation output decrease with each call.
+
+### Fee Deduction from Continuation Output
+
+When you call a stateful contract method, the fee is deducted from the satoshis carried forward:
+
+```
+Deploy:  counter (10000 sat, count=0)
+Call #1: counter (9800 sat, count=1)   -- fee ~200 sat
+Call #2: counter (9600 sat, count=2)   -- fee ~200 sat
+Call #3: counter (9400 sat, count=3)   -- fee ~200 sat
+...
+Call #47: counter (600 sat, count=47)  -- approaching dust limit
+```
+
+### Running Out of Satoshis
+
+If the continuation output would fall below the dust threshold (546 satoshis), the call will fail. To prevent this, you have two options.
+
+**Option 1: Start with enough satoshis.** Estimate the number of state transitions you expect and deploy with sufficient funds:
+
+```typescript
+const expectedCalls = 100;
+const feePerCall = 200; // estimate
+const initialSatoshis = 546 + (expectedCalls * feePerCall);
+// 546 + 20000 = 20546 satoshis
+
+await counter.deploy({ satoshis: initialSatoshis });
+```
+
+**Option 2: Add funding inputs.** When the continuation output is getting low, add external funding to the call transaction:
+
+```typescript
+const result = await counter.call('increment', {
+  preimage: 'auto',
+}, {
+  outputs: 'auto',
+  fundingUtxos: [
+    { txid: '...', outputIndex: 0, satoshis: 10000, script: '...' },
+  ],
+});
+```
+
+The additional funding UTXO provides extra satoshis to cover the fee without reducing the continuation output's balance.
+
+## Manual Fee and Change Control
+
+For full control, use the low-level transaction building functions:
+
+```typescript
+import { buildDeployTransaction, selectUtxos } from 'runar-sdk';
+
+const utxos = await provider.getUtxos(signer.address);
+
+// Manually select UTXOs with extra headroom
+const selected = selectUtxos(utxos, 15000);
+
+// Build transaction with explicit options
+const tx = buildDeployTransaction(contract, selected, {
+  satoshis: 10000,
+  changeAddress: 'mMyChange...',
+  feeRate: 0.5,
+});
+
+// Inspect the fee before broadcasting
+const inputTotal = selected.reduce((s, u) => s + u.satoshis, 0);
+const outputTotal = tx.outputs.reduce((s, o) => s + o.satoshis, 0);
+const actualFee = inputTotal - outputTotal;
+console.log('Fee:', actualFee, 'satoshis');
+console.log('Fee rate:', actualFee / tx.toHex().length * 2, 'sat/byte');
+```
+
+### Overriding Fee Rate
+
+The default fee rate is 0.5 satoshis per byte. You can override it:
+
+```typescript
+// Higher fee for faster confirmation during congestion
+const result = await contract.deploy({
+  satoshis: 10000,
+  feeRate: 1.0,
+});
+
+// Lower fee (if your node accepts it)
+const result2 = await contract.deploy({
+  satoshis: 10000,
+  feeRate: 0.25,
+});
+```
+
+## Optimizing Transaction Size and Cost
+
+Several strategies reduce transaction size and fees:
+
+**Minimize method arguments.** Each argument adds bytes to the unlocking script. Use the smallest types possible (`Ripemd160` is 20 bytes, `PubKey` is 33 bytes, a full `ByteString` can be arbitrary).
+
+**Use the constant folder.** Enable constant folding during compilation to reduce script size:
+
+```bash
+runar compile contracts/MyContract.runar.ts --enable-constant-folding
+```
+
+**Merge token UTXOs.** Many small token UTXOs cost more to spend than one large one. Use `TokenWallet.merge()` to consolidate periodically.
+
+**Batch state transitions.** If your contract design allows it, process multiple operations in a single state transition rather than one per transaction.
+
+### Fee Comparison Table
+
+| Operation | Typical Size | Fee (at 0.5 sat/byte) |
+| --------- | ------------ | --------------------- |
+| Deploy P2PKH | ~250 bytes | ~125 sat |
+| Call P2PKH (unlock) | ~350 bytes | ~175 sat |
+| Deploy Counter (stateful) | ~400 bytes | ~200 sat |
+| Call Counter (increment) | ~450 bytes | ~225 sat |
+| Token transfer (split) | ~600 bytes | ~300 sat |
+| Token merge (2-to-1) | ~700 bytes | ~350 sat |
+
+These are approximate. Actual sizes depend on the specific contract, number of state fields, and argument sizes.
+
+## What's Next
+
+- [Deploying a Contract](/docs/en/sdk/deploying) -- Deployment workflow including fee handling
+- [Calling a Contract](/docs/en/sdk/calling) -- How fees are handled during method calls
+- [Token Contracts](/docs/en/sdk/token-contracts) -- Fee considerations for token operations
