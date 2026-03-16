@@ -1,0 +1,23 @@
+---
+import SectionLabel from './SectionLabel.astro';
+---
+
+<section class="py-24 px-4">
+  <div class="max-w-6xl mx-auto">
+    <SectionLabel number="01" title="What is Rúnar" />
+    <div class="grid md:grid-cols-2 gap-12 lg:gap-20">
+      <div>
+        <h2 class="text-2xl font-semibold mb-4">The Compiler</h2>
+        <p class="text-text-secondary leading-relaxed">
+          Write Bitcoin smart contracts in <span class="text-text">TypeScript, Go, Rust, Python, Solidity, or Move</span> — languages you already know. Rúnar compiles them to optimized Bitcoin Script that runs natively on BSV's UTXO model.
+        </p>
+      </div>
+      <div>
+        <h2 class="text-2xl font-semibold mb-4">The SDK</h2>
+        <p class="text-text-secondary leading-relaxed">
+          Deploy, call, and manage contracts on BSV with a <span class="text-text">type-safe SDK</span> that handles the complexity of UTXO-based transactions, fee management, and state tracking for you.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>

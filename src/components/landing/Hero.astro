@@ -1,0 +1,36 @@
+---
+import Button from '@components/shared/Button.astro';
+import TerminalDemo from './TerminalDemo';
+---
+
+<section class="relative min-h-[90vh] flex items-center px-4 overflow-hidden">
+  <!-- Subtle grid background -->
+  <div class="absolute inset-0 opacity-[0.03]" style="background-image: linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px); background-size: 60px 60px;"></div>
+
+  <div class="relative max-w-6xl mx-auto w-full py-20">
+    <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+      <!-- Left: Text -->
+      <div>
+        <h1 class="text-5xl sm:text-6xl lg:text-7xl font-mono font-bold tracking-tight mb-6">
+          R<span class="text-accent-500">ú</span>nar
+        </h1>
+        <p class="text-xl sm:text-2xl text-text-secondary max-w-lg mb-8 leading-relaxed">
+          Write smart contracts in TypeScript, Go, Rust, or Python. Compile to Bitcoin Script. Deploy to BSV.
+        </p>
+        <div class="flex flex-col sm:flex-row items-start gap-4">
+          <Button href="/docs/getting-started/overview" size="lg">
+            Get Started
+          </Button>
+          <Button href="https://github.com/icellan/runar" variant="secondary" size="lg" target="_blank" rel="noopener noreferrer">
+            View on GitHub
+          </Button>
+        </div>
+      </div>
+
+      <!-- Right: Terminal -->
+      <div class="hidden md:block">
+        <TerminalDemo client:visible />
+      </div>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,407 @@
+---
+title: "How Smart Contracts Work on BSV"
+description: "Contract execution in the UTXO model."
+section: "bitcoin-bsv-basics"
+order: 40
+lang: "en"
+---
+
+Smart contracts on BSV operate differently from account-based blockchains. Instead of persistent on-chain state, contracts are encoded as spending conditions within UTXOs and executed by miners during transaction validation. This page ties together everything from the previous three pages and explains the complete mechanics of how Runar contracts run on BSV.
+
+## Contracts as Spending Conditions
+
+On BSV, a smart contract **is** a locking script. The contract's logic is compiled into Bitcoin Script opcodes and placed in the `scriptPubKey` of a transaction output. When someone wants to interact with the contract --- call a method, claim funds, transition state --- they create a new transaction whose input references the contract UTXO and provides an unlocking script (`scriptSig`) with the required arguments.
+
+The miner validates the interaction by executing the unlocking script followed by the locking script. If execution succeeds, the contract call is valid and the transaction is accepted.
+
+```
+Contract UTXO:
+  Value: 10,000 sats
+  Locking script: [compiled Runar contract code]
+
+Spending transaction:
+  Input 0:
+    Outpoint: (txid of contract UTXO, output index)
+    Unlocking script: [method selector] [argument 1] [argument 2] ...
+  Output 0:
+    Value: 9,700 sats
+    Locking script: [new contract state, or payment destination]
+```
+
+This model means that **the miner is the executor**. There is no separate virtual machine or runtime. The Bitcoin Script interpreter built into every BSV node is the smart contract execution environment.
+
+## Multi-Method Dispatch
+
+Most useful contracts have more than one method. A token contract might have `transfer`, `mint`, and `burn` methods. An auction contract might have `bid`, `close`, and `refund`. Runar supports this through **multi-method dispatch**.
+
+The compiler generates a dispatch table at the beginning of the locking script. The first data element in the unlocking script is a **method selector** --- an integer that identifies which method is being called. The dispatch table uses `OP_IF`/`OP_ELSE`/`OP_ENDIF` branches to route execution to the correct method code:
+
+```
+// Compiler-generated dispatch structure (simplified):
+
+// The unlocking script pushes: <method_selector> <arg1> <arg2> ...
+
+// Locking script begins:
+OP_DUP OP_0 OP_NUMEQUAL    // Is method selector == 0?
+OP_IF
+  OP_DROP                   // Drop the selector
+  [... method 0 code ...]   // Execute method 0 (e.g., "transfer")
+OP_ELSE
+  OP_DUP OP_1 OP_NUMEQUAL  // Is method selector == 1?
+  OP_IF
+    OP_DROP                 // Drop the selector
+    [... method 1 code ...] // Execute method 1 (e.g., "mint")
+  OP_ELSE
+    OP_2 OP_NUMEQUAL        // Is method selector == 2?
+    OP_IF
+      [... method 2 code ...] // Execute method 2 (e.g., "burn")
+    OP_ELSE
+      OP_FALSE              // Unknown method: fail
+    OP_ENDIF
+  OP_ENDIF
+OP_ENDIF
+```
+
+From the Runar developer's perspective, you simply define methods on your contract class. The compiler handles generating the dispatch logic:
+
+```typescript
+import { StatefulSmartContract, assert, PubKey, Sig, checkSig } from 'runar-lang';
+
+class Token extends StatefulSmartContract {
+  balance: bigint;
+
+  constructor(balance: bigint) {
+    super(balance);
+    this.balance = balance;
+  }
+
+  public transfer(sig: Sig, owner: PubKey, amount: bigint) {
+    // Method 0 in the dispatch table
+    assert(checkSig(sig, owner));
+    assert(amount <= this.balance);
+    this.balance = this.balance - amount;
+    assert(true);
+  }
+
+  public burn(sig: Sig, owner: PubKey) {
+    // Method 1 in the dispatch table
+    assert(checkSig(sig, owner));
+  }
+}
+```
+
+When the SDK calls `contract.call('transfer', ...)`, it automatically prepends the correct method selector (`0`) to the unlocking script.
+
+## Stateless vs. Stateful Contracts
+
+There are two fundamental categories of BSV smart contracts, and Runar supports both through distinct base classes.
+
+### Stateless Contracts (SmartContract)
+
+A stateless contract has all of its data **baked into the locking script at creation time**. It does not carry mutable state between interactions. When you spend a stateless contract UTXO, the contract executes and the UTXO is consumed --- there is no continuation.
+
+**Examples:** Pay-to-public-key-hash (P2PKH), escrow, hash puzzles, multi-signature wallets.
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, checkSig } from 'runar-lang';
+
+class Escrow extends SmartContract {
+  readonly buyer: PubKey;
+  readonly seller: PubKey;
+  readonly arbiter: PubKey;
+
+  constructor(buyer: PubKey, seller: PubKey, arbiter: PubKey) {
+    super(buyer, seller, arbiter);
+    this.buyer = buyer;
+    this.seller = seller;
+    this.arbiter = arbiter;
+  }
+
+  public release(sellerSig: Sig, buyerSig: Sig) {
+    assert(checkSig(sellerSig, this.seller));
+    assert(checkSig(buyerSig, this.buyer));
+  }
+
+  public refund(buyerSig: Sig, arbiterSig: Sig) {
+    assert(checkSig(buyerSig, this.buyer));
+    assert(checkSig(arbiterSig, this.arbiter));
+  }
+}
+```
+
+When this contract is deployed, the public keys for buyer, seller, and arbiter are embedded directly in the locking script. Calling `release` spends the UTXO and sends the value to the seller. Calling `refund` spends it and sends value to the buyer. Either way, the contract UTXO is consumed and gone.
+
+The compiled locking script looks something like:
+
+```
+<buyer_pubkey> <seller_pubkey> <arbiter_pubkey>
+[dispatch: method 0 = release, method 1 = refund]
+[release code: check sig against buyer or arbiter]
+[refund code: check sig against seller or arbiter]
+```
+
+### Stateful Contracts (StatefulSmartContract)
+
+A stateful contract maintains state across multiple interactions. Each call **spends the current contract UTXO and creates a new one** with updated state. The contract enforces this continuation by constraining what outputs the spending transaction is allowed to create.
+
+**Examples:** Counters, auctions, games (tic-tac-toe, chess), token contracts.
+
+```typescript
+import {
+  StatefulSmartContract, assert, SigHashPreimage,
+  checkPreimage, extractOutputHash, hash256,
+} from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor() {
+    super();
+    this.count = 0n;
+  }
+
+  public increment(txPreimage: SigHashPreimage) {
+    assert(checkPreimage(txPreimage));
+    this.count = this.count + 1n;
+
+    // Enforce that the spending transaction creates a new UTXO with the updated count
+    this.addOutput(1n, this.count);
+    const expectedHash = hash256(this.getStateScript());
+    assert(extractOutputHash(txPreimage) === expectedHash);
+  }
+}
+```
+
+The critical pattern is the `addOutput` + `extractOutputHash` assertion. The contract verifies that the spending transaction's outputs match what the contract expects. But how can a script running inside a transaction inspect the transaction itself? That is the job of **OP_PUSH_TX**.
+
+## The OP_PUSH_TX Technique
+
+OP_PUSH_TX is not a single opcode --- it is a **technique** that uses existing opcodes to give a Bitcoin Script the ability to inspect its own spending transaction. It is the enabling mechanism for stateful contracts, covenants, and any contract logic that needs to constrain transaction outputs.
+
+### The Problem
+
+Bitcoin Script normally has no way to see the transaction it is running inside. The locking script can only see data pushed onto the stack by the unlocking script. But for a stateful contract, the locking script needs to verify that the spending transaction creates the correct next UTXO. Without some form of transaction introspection, this is impossible.
+
+### The Insight
+
+`OP_CHECKSIG` already performs transaction introspection internally. When it verifies a signature, it:
+
+1. Constructs the BIP-143 sighash **preimage** (a serialization of transaction fields).
+2. Hashes the preimage with double SHA-256.
+3. Verifies the ECDSA signature against that hash and the provided public key.
+
+The OP_PUSH_TX technique exploits this by using a **known private key** --- specifically, the private key `k = 1`, whose corresponding public key is the **generator point G** of the secp256k1 elliptic curve. Since the private key is known, anyone can compute the correct signature for any message.
+
+### How It Works Step by Step
+
+1. **The unlocking script pushes the sighash preimage onto the stack.** This is a byte sequence containing all the transaction fields (version, hashPrevouts, hashSequence, outpoint, scriptCode, value, nSequence, hashOutputs, locktime, sigHashType).
+
+2. **The unlocking script pushes a signature** computed with private key `k = 1` over the double-SHA-256 of that preimage.
+
+3. **The locking script pushes the known public key** (the generator point G).
+
+4. **The locking script runs `OP_CHECKSIG`**, which:
+   - Independently constructs the sighash preimage from the actual transaction data.
+   - Hashes it.
+   - Verifies the pushed signature against that hash using the pushed public key (G).
+
+5. **If `OP_CHECKSIG` succeeds**, the pushed preimage must match the real transaction data. If the unlocking script had pushed a fake preimage, the signature would not verify because the miner's independently computed hash would differ.
+
+6. **Now the preimage is validated and on the stack.** The locking script can parse it to extract any transaction field --- including `hashOutputs`.
+
+```
+Unlocking script:
+  <sighash_preimage>    // Serialized transaction fields
+  <sig_with_k1>         // Signature computed with private key = 1
+
+Locking script:
+  <generator_point_G>   // Known public key for k = 1
+  OP_CHECKSIG           // Verifies preimage matches real transaction
+                        // Now we trust the preimage on the stack
+
+  // Parse the preimage to extract hashOutputs (bytes 164-196):
+  [... split/extract preimage fields ...]
+
+  // Compute expected hashOutputs from contract logic:
+  [... build expected output, hash it ...]
+
+  // Verify they match:
+  OP_EQUAL
+```
+
+### The BIP-143 Preimage Fields
+
+Once the preimage is validated by `OP_CHECKSIG`, the script can extract individual fields using `OP_SPLIT` at known byte offsets:
+
+| Offset | Size | Field | Use in Contracts |
+|---|---|---|---|
+| 0 | 4 | nVersion | Version checks |
+| 4 | 32 | hashPrevouts | Input verification |
+| 36 | 32 | hashSequence | Sequence verification |
+| 68 | 36 | outpoint | Self-identification (which UTXO am I?) |
+| 104 | var | scriptCode | Self-reference (my own locking script) |
+| var | 8 | value | How many satoshis are locked in me |
+| var | 4 | nSequence | Time-lock checks |
+| var | 32 | hashOutputs | **Output constraint enforcement** |
+| var | 4 | nLockTime | Time-lock checks |
+| var | 4 | sigHashType | Sighash mode verification |
+
+The most important field for stateful contracts is **hashOutputs** --- the SHA-256d hash of all the transaction's outputs. By computing the expected output (the new contract UTXO with updated state) and comparing its hash to the hashOutputs from the preimage, the contract can enforce that the spending transaction creates exactly the right next state.
+
+### Why Private Key k=1?
+
+The choice of `k = 1` is deliberate:
+
+- The public key for `k = 1` is the **generator point G**, which is a well-known constant of the secp256k1 curve. It can be hardcoded into the locking script.
+- Since `k = 1` is publicly known, **anyone** can compute the correct signature for any message. This means the signature is not providing authorization (anyone can create it) --- it is solely being used as a **proof mechanism** to verify that the preimage matches the real transaction.
+- The signature verification is a side effect of `OP_CHECKSIG` that we are exploiting. The real purpose is to get a trusted copy of the transaction data onto the stack.
+
+## State Serialization
+
+For stateful contracts, the contract's state fields must be stored on-chain in a way that allows the script to read current state and verify new state. Runar uses a convention where state is serialized **at the end of the locking script**, after an `OP_RETURN` marker:
+
+```
+Locking script structure for stateful contracts:
+
+[contract logic]     // The compiled Bitcoin Script code
+OP_RETURN            // Separator --- marks the boundary
+[state field 1]      // Serialized state data
+[state field 2]
+[...]
+[state field N]
+```
+
+The `OP_RETURN` opcode normally makes an output unspendable, but in this context it appears **within** the locking script as a data separator. The contract logic jumps over this section during execution. The state data after `OP_RETURN` is readable by the script (which knows its own locking script via the scriptCode field of the sighash preimage) and can be parsed to extract current state values.
+
+When a stateful contract transitions, the new locking script has the **same contract logic** but **updated state data** after the `OP_RETURN`:
+
+```
+Before (current UTXO):
+  [contract code] OP_RETURN [count = 5]
+
+After (new UTXO created by spending transaction):
+  [contract code] OP_RETURN [count = 6]
+```
+
+The contract verifies this transition by:
+
+1. Extracting the contract code from its own scriptCode (via the sighash preimage).
+2. Computing the new state values according to the method logic.
+3. Constructing the expected new locking script (same code + new state).
+4. Constructing the expected output (satoshi value + new locking script).
+5. Hashing the expected outputs.
+6. Comparing the hash to the hashOutputs field from the sighash preimage.
+7. If they match, the spending transaction is creating the correct next state.
+
+## Putting It All Together
+
+Here is the complete flow for a stateful contract call, from the developer's perspective down to what happens on-chain:
+
+### 1. Developer Writes Contract
+
+```typescript
+import {
+  StatefulSmartContract, assert, Sig, PubKey, SigHashPreimage,
+  checkSig, checkPreimage, extractOutputHash, hash256,
+} from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor() { super(); this.count = 0n; }
+
+  public increment(callerSig: Sig, callerPubKey: PubKey, txPreimage: SigHashPreimage) {
+    assert(checkPreimage(txPreimage));
+    assert(checkSig(callerSig, callerPubKey));
+    this.count = this.count + 1n;
+    this.addOutput(1n, this.count);
+    assert(extractOutputHash(txPreimage) === hash256(this.getStateScript()));
+  }
+}
+```
+
+### 2. Compiler Produces Bitcoin Script
+
+The Runar compiler translates this into a locking script that:
+
+- Implements the method dispatch table.
+- Contains the `increment` method logic (signature check, counter increment).
+- Includes the OP_PUSH_TX boilerplate for sighash preimage verification.
+- Serializes the `count` state field after an `OP_RETURN` separator.
+
+### 3. SDK Deploys the Contract
+
+The SDK creates a deployment transaction:
+
+```
+Transaction T1 (Deploy):
+  Input 0: Funding UTXO from wallet
+  Output 0: 10,000 sats | [contract code] OP_RETURN [count = 0]
+  Output 1: Change back to wallet
+```
+
+### 4. SDK Calls the Contract
+
+When the user calls `counter.methods.increment(sig, pubKey)`, the SDK:
+
+- Fetches the current contract UTXO (T1:Output 0).
+- Constructs the sighash preimage for the spending transaction.
+- Computes the signature with `k = 1` over the preimage.
+- Builds the unlocking script: `<preimage> <sig_k1> <method_selector=0> <callerSig> <callerPubKey>`.
+- Builds the output: the new contract UTXO with `count = 1`.
+- Creates and broadcasts the transaction.
+
+```
+Transaction T2 (Call increment):
+  Input 0: T1:Output 0
+    Unlocking: <preimage> <sig_k1> <0> <callerSig> <callerPubKey>
+  Output 0: 10,000 sats | [contract code] OP_RETURN [count = 1]
+```
+
+### 5. Miner Validates
+
+The miner executes the unlocking script (pushing data onto the stack) followed by the locking script, which:
+
+1. Reads the method selector (`0`) and dispatches to `increment`.
+2. Verifies `callerSig` against `callerPubKey` using `OP_CHECKSIG`.
+3. Verifies the sighash preimage using OP_PUSH_TX (another `OP_CHECKSIG` with generator point G).
+4. Extracts `hashOutputs` from the verified preimage.
+5. Reads the current `count` value (0) from the state section.
+6. Computes `count + 1 = 1`.
+7. Constructs the expected output: `[contract code] OP_RETURN [count = 1]` with 10,000 sats.
+8. Hashes the expected output and compares to `hashOutputs`.
+9. If equal, the script succeeds. If not, the transaction is rejected.
+
+The miner has now verified --- using only Bitcoin Script execution --- that the spending transaction correctly implements the counter increment and preserves the contract for future interactions.
+
+## Comparing BSV Contracts to EVM Contracts
+
+| Aspect | BSV (UTXO + Script) | Ethereum (EVM) |
+|---|---|---|
+| Contract storage | Encoded in locking script of each UTXO | Global key-value storage per contract |
+| State transition | Spend UTXO, create new UTXO with new state | Modify storage slots in-place |
+| Execution | Miners execute Script during validation | EVM executes bytecode in a virtual machine |
+| Parallelism | UTXOs are independent --- parallel by default | Sequential within a block (global state) |
+| Termination | Guaranteed (no loops in Script) | Gas-bounded (runs until gas exhausted) |
+| Cost model | Fee based on transaction size (bytes) | Gas based on opcode complexity |
+| Contract identity | Chain of UTXOs (each has different txid) | Fixed address with persistent state |
+| Composability | Via transaction construction (multi-input) | Direct contract-to-contract calls |
+| Visibility | All data in scripts is public on-chain | Storage slots are public on-chain |
+| Upgradability | New UTXO can have different script | Proxy pattern or immutable |
+
+### Key Advantages of the BSV Model
+
+- **Scalability**: No global state contention means massively parallel validation.
+- **Predictability**: Script execution cost is bounded by script size, with no surprises.
+- **Simplicity**: The execution model is simpler --- no virtual machine, no gas accounting, no reentrancy attacks.
+- **Auditability**: Each state transition is a distinct UTXO, making the full history easy to trace.
+
+### Key Tradeoffs
+
+- **No direct contract-to-contract calls**: Composing contracts requires building multi-input transactions rather than calling one contract from another.
+- **State management complexity**: The spend-and-recreate pattern is more complex than in-place storage modification (but Runar abstracts this).
+- **No global reads**: A contract cannot query another contract's state during execution. Cross-contract coordination must happen via transaction structure.
+
+## Next Steps
+
+With a solid understanding of how BSV smart contracts work at the protocol level, you are ready to start [Writing Contracts](/docs/en/writing-contracts/contract-basics) in Runar. The compiler and SDK handle the low-level details described on this page --- OP_PUSH_TX, state serialization, dispatch tables, and transaction construction --- so you can focus on your contract's business logic.

@@ -1,0 +1,41 @@
+---
+import SidebarLink from './SidebarLink.astro';
+
+interface Props {
+  title: string;
+  sectionKey: string;
+  items: { title: string; slug: string }[];
+  currentPath: string;
+}
+
+const { title, sectionKey, items, currentPath } = Astro.props;
+const hasActivePage = items.some(item => currentPath === `/docs/${sectionKey}/${item.slug}`);
+---
+
+<div class="mb-4">
+  <details open={hasActivePage} class="group">
+    <summary class="flex items-center justify-between cursor-pointer font-mono text-xs uppercase tracking-wider text-text-tertiary hover:text-text-secondary py-1 select-none list-none [&::-webkit-details-marker]:hidden">
+      <span>{title}</span>
+      <svg
+        class="w-3.5 h-3.5 transition-transform group-open:rotate-90"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <polyline points="9 18 15 12 9 6" />
+      </svg>
+    </summary>
+    <div class="mt-1 space-y-0.5">
+      {items.map(item => (
+        <SidebarLink
+          title={item.title}
+          href={`/docs/${sectionKey}/${item.slug}`}
+          active={currentPath === `/docs/${sectionKey}/${item.slug}`}
+        />
+      ))}
+    </div>
+  </details>
+</div>

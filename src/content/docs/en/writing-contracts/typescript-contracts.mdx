@@ -1,0 +1,534 @@
+---
+title: "TypeScript Contracts"
+description: "Writing contracts in TypeScript."
+section: "writing-contracts"
+order: 20
+lang: "en"
+---
+
+TypeScript is the primary and most mature language for writing Runar smart contracts. It offers familiar syntax, strong typing, and a well-established toolchain. If you are new to Runar, start here.
+
+## File Extension and Imports
+
+TypeScript contract files use the `.runar.ts` extension. This tells the Runar compiler to treat the file as a contract source rather than regular TypeScript.
+
+All contract types, base classes, and built-in functions are imported from the `runar-lang` package:
+
+```typescript
+import {
+  SmartContract,
+  StatefulSmartContract,
+  assert,
+  PubKey,
+  Sig,
+  Ripemd160,
+  Sha256,
+  ByteString,
+  Addr,
+  Point,
+  SigHashPreimage,
+  RabinSig,
+  RabinPubKey,
+  FixedArray,
+  hash160,
+  hash256,
+  sha256,
+  ripemd160,
+  checkSig,
+  checkMultiSig,
+  checkPreimage,
+  len,
+  cat,
+  substr,
+  num2bin,
+  bin2num,
+} from 'runar-lang';
+```
+
+Import only what you need. Arbitrary imports from other packages or local modules are not allowed -- only `runar-lang` exports are available within contract files.
+
+## Stateless Contracts with SmartContract
+
+A stateless contract extends `SmartContract`. All properties are `readonly` and fixed at deployment time. The contract defines one or more `public` methods that serve as spending conditions.
+
+### P2PKH: Pay-to-Public-Key-Hash
+
+The simplest practical contract. It locks funds to a public key hash and requires a valid signature to spend.
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, Ripemd160, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Ripemd160;
+
+  constructor(pubKeyHash: Ripemd160) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+```
+
+Key points:
+
+- The `constructor` calls `super()` with all readonly property values. This is required so the compiler can embed them into the locking script.
+- The `unlock` method is `public`, making it a spending entry point. Anyone who can provide a valid `sig` and `pubKey` that hashes to `pubKeyHash` can spend the UTXO.
+- Every public method must end with (or include) at least one `assert()` call. If all assertions pass, the spend succeeds.
+
+### Escrow: Multi-party Contract with Multiple Entry Points
+
+A contract can have multiple public methods, each representing a different spending path.
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, checkSig } from 'runar-lang';
+
+class Escrow extends SmartContract {
+  readonly buyer: PubKey;
+  readonly seller: PubKey;
+  readonly arbiter: PubKey;
+
+  constructor(buyer: PubKey, seller: PubKey, arbiter: PubKey) {
+    super(buyer, seller, arbiter);
+    this.buyer = buyer;
+    this.seller = seller;
+    this.arbiter = arbiter;
+  }
+
+  // Buyer and seller agree to release funds to seller
+  public release(sellerSig: Sig, buyerSig: Sig) {
+    assert(checkSig(sellerSig, this.seller));
+    assert(checkSig(buyerSig, this.buyer));
+  }
+
+  // Buyer and arbiter agree to refund buyer
+  public refund(buyerSig: Sig, arbiterSig: Sig) {
+    assert(checkSig(buyerSig, this.buyer));
+    assert(checkSig(arbiterSig, this.arbiter));
+  }
+
+  // Seller and arbiter agree to release funds to seller
+  public arbitrate(sellerSig: Sig, arbiterSig: Sig) {
+    assert(checkSig(sellerSig, this.seller));
+    assert(checkSig(arbiterSig, this.arbiter));
+  }
+}
+```
+
+When this contract is spent, the spender chooses which public method to invoke. The compiled script routes execution to the correct method based on an index provided in the unlocking script.
+
+## Stateful Contracts with StatefulSmartContract
+
+A stateful contract extends `StatefulSmartContract`. It can have both `readonly` properties (fixed at deployment) and mutable properties (updated each transaction). The compiler automatically handles state serialization and the OP_PUSH_TX covenant pattern.
+
+### Counter: Basic State Transitions
+
+```typescript
+import { StatefulSmartContract, assert } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor() {
+    super();
+    this.count = 0n;
+  }
+
+  public increment() {
+    this.count = this.count + 1n;
+    assert(true);
+  }
+
+  public decrement() {
+    assert(this.count > 0n);
+    this.count = this.count - 1n;
+    assert(true);
+  }
+}
+```
+
+When `increment()` is called, the compiler ensures the spending transaction creates a new output whose locking script contains the updated `count` value. The old UTXO is consumed and a new one is created -- this is how state "moves forward" in the UTXO model.
+
+The `assert(true)` at the end of each method is the simplest way to satisfy the requirement that every public method must assert. In practice, stateful contracts often assert additional conditions (balance checks, authorization, etc.).
+
+### Accessing the Transaction Preimage
+
+Stateful contracts can access `this.txPreimage` to inspect the serialized transaction being validated. This is useful for advanced covenant logic:
+
+```typescript
+import { StatefulSmartContract, assert, extractAmount, extractOutputHash } from 'runar-lang';
+
+class DepositBox extends StatefulSmartContract {
+  balance: bigint;
+
+  constructor() {
+    super();
+    this.balance = 0n;
+  }
+
+  public deposit(amount: bigint) {
+    assert(amount > 0n);
+    this.balance = this.balance + amount;
+    assert(true);
+  }
+}
+```
+
+### Multi-Output Transactions
+
+By default, a stateful contract produces a single output containing its updated state. For more complex transactions (splitting funds, paying fees, distributing tokens), use `this.addOutput()`:
+
+```typescript
+public split(amount: bigint) {
+  assert(amount > 0n && amount < this.balance);
+  const remainder = this.balance - amount;
+  this.balance = remainder;
+  // Add an additional P2PKH output for the split amount
+  this.addOutput(amount, this.ownerPubKeyHash);
+  assert(true);
+}
+```
+
+For complete control over output scripts, use `this.addRawOutput(satoshis, scriptBytes)` to append a raw script output.
+
+## The Constructor Pattern
+
+The constructor is where you bind property values. The pattern differs between stateless and stateful contracts.
+
+**Stateless contracts** pass all readonly values to `super()`:
+
+```typescript
+class HashLock extends SmartContract {
+  readonly hashValue: Sha256;
+
+  constructor(hashValue: Sha256) {
+    super(hashValue);
+    this.hashValue = hashValue;
+  }
+}
+```
+
+**Stateful contracts** call `super()` with no arguments and initialize state directly:
+
+```typescript
+class Ballot extends StatefulSmartContract {
+  readonly admin: PubKey;  // readonly still passed at deploy time
+  yesVotes: bigint;
+  noVotes: bigint;
+
+  constructor(admin: PubKey) {
+    super();
+    this.admin = admin;
+    this.yesVotes = 0n;
+    this.noVotes = 0n;
+  }
+}
+```
+
+Note that readonly properties in a `StatefulSmartContract` are set in the constructor body but are not passed to `super()`.
+
+## Types in TypeScript Contracts
+
+All types are imported from `runar-lang`. The type system is strict -- there is no `any`, `unknown`, `undefined`, or `null`.
+
+### Numeric Values
+
+Use `bigint` exclusively. The `number` type is not allowed. Always use the `n` suffix for literals:
+
+```typescript
+const amount: bigint = 1000n;
+const zero: bigint = 0n;
+const negative: bigint = -5n;
+```
+
+### Byte Types
+
+All byte-oriented types are subtypes of `ByteString`:
+
+```typescript
+const pubKey: PubKey = ...;           // 33-byte compressed public key
+const sig: Sig = ...;                 // 71-73 byte DER signature
+const hash: Sha256 = sha256(data);    // 32-byte hash
+const addr: Ripemd160 = hash160(pk);  // 20-byte hash
+```
+
+### Fixed Arrays
+
+Use `FixedArray<T, N>` for arrays. The size `N` must be a compile-time constant:
+
+```typescript
+// Array of 3 public keys
+const signers: FixedArray<PubKey, 3> = [pk1, pk2, pk3];
+
+// Array of 10 bigints
+const balances: FixedArray<bigint, 10> = [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n];
+```
+
+You cannot use dynamic array methods like `push()`, `pop()`, `splice()`, or `filter()`. Access elements by index and iterate with `for` loops that have constant bounds.
+
+### Affine Types
+
+`Sig` and `SigHashPreimage` are affine types. The compiler enforces that each value is consumed exactly once:
+
+```typescript
+// CORRECT: sig is used once
+public unlock(sig: Sig, pubKey: PubKey) {
+  assert(checkSig(sig, pubKey));
+}
+
+// COMPILE ERROR: sig is used twice
+public badUnlock(sig: Sig, pk1: PubKey, pk2: PubKey) {
+  assert(checkSig(sig, pk1));  // first use
+  assert(checkSig(sig, pk2));  // error: sig already consumed
+}
+```
+
+## Using Built-in Functions
+
+Built-in functions are imported from `runar-lang` alongside types. They compile directly to Bitcoin Script opcodes or verified script patterns.
+
+### Hashing
+
+```typescript
+import { sha256, hash256, hash160, ripemd160 } from 'runar-lang';
+
+const singleHash: Sha256 = sha256(data);
+const doubleHash: Sha256 = hash256(data);     // SHA-256(SHA-256(data))
+const addressHash: Ripemd160 = hash160(data); // RIPEMD-160(SHA-256(data))
+```
+
+### Signature Verification
+
+```typescript
+import { checkSig, checkMultiSig } from 'runar-lang';
+
+// Single signature
+assert(checkSig(sig, pubKey));
+
+// Multi-signature (2-of-3)
+assert(checkMultiSig([sig1, sig2], [pk1, pk2, pk3]));
+```
+
+### Byte Manipulation
+
+```typescript
+import { len, cat, substr, left, right, split, reverseBytes, toByteString } from 'runar-lang';
+
+const length: bigint = len(data);
+const combined: ByteString = cat(part1, part2);
+const chunk: ByteString = substr(data, 0n, 10n);
+const prefix: ByteString = left(data, 4n);
+const suffix: ByteString = right(data, 4n);
+const [head, tail] = split(data, 16n);
+const reversed: ByteString = reverseBytes(data);
+```
+
+### Math
+
+```typescript
+import { abs, min, max, within, safediv, clamp, pow, sqrt } from 'runar-lang';
+
+const distance: bigint = abs(a - b);
+const smallest: bigint = min(x, y);
+const bounded: bigint = clamp(value, 0n, 100n);
+const inRange: boolean = within(value, 10n, 20n);  // true if 10 <= value < 20
+const result: bigint = safediv(a, b);               // safe from divide-by-zero
+```
+
+## Control Flow
+
+### For Loops
+
+`for` loops are the only loop construct available. The bounds must be compile-time constants because the compiler unrolls them:
+
+```typescript
+let sum: bigint = 0n;
+for (let i = 0n; i < 10n; i++) {
+  sum = sum + balances[Number(i)];
+}
+```
+
+This generates 10 copies of the loop body in the compiled script. Keep loop counts reasonable to avoid script size bloat.
+
+### Conditionals
+
+Standard `if`/`else` statements and the ternary operator work as expected:
+
+```typescript
+if (amount > threshold) {
+  this.balance = this.balance - amount;
+} else {
+  assert(false); // reject transaction
+}
+
+const fee: bigint = amount > 1000n ? 10n : 1n;
+```
+
+### Eager Evaluation Warning
+
+Logical `&&` and `||` evaluate **both** sides, unlike JavaScript's short-circuit behavior:
+
+```typescript
+// CAUTION: both checkSig calls execute regardless of the first result
+const valid: boolean = checkSig(sig1, pk1) && checkSig(sig2, pk2);
+```
+
+This matters for performance and for understanding gas/computation costs. Both branches always execute.
+
+## Private Methods and Inlining
+
+Private methods are useful for code organization but have no runtime overhead -- they are inlined at every call site:
+
+```typescript
+class TokenTransfer extends SmartContract {
+  readonly owner: PubKey;
+
+  constructor(owner: PubKey) {
+    super(owner);
+    this.owner = owner;
+  }
+
+  private verifyOwner(sig: Sig): boolean {
+    return checkSig(sig, this.owner);
+  }
+
+  private validateAmount(amount: bigint): boolean {
+    return amount > 0n && amount <= 1000000n;
+  }
+
+  public transfer(sig: Sig, amount: bigint, recipient: Addr) {
+    assert(this.verifyOwner(sig));
+    assert(this.validateAmount(amount));
+  }
+}
+```
+
+Since private methods are inlined, calling the same private method from multiple public methods duplicates its code in each path. For very large helper methods called from many places, be aware of the script size impact.
+
+## Compiling TypeScript Contracts
+
+Use the Runar CLI to compile:
+
+```bash
+runar compile contracts/P2PKH.runar.ts --output ./artifacts
+```
+
+This produces a JSON artifact containing the compiled Bitcoin Script, the contract ABI (method signatures and parameter types), and metadata. See [Output Artifacts](/docs/en/compiler/output-artifacts) for details on the artifact format.
+
+To compile with additional output:
+
+```bash
+runar compile contracts/P2PKH.runar.ts --output ./artifacts --ir --asm
+```
+
+The `--ir` flag includes the intermediate representation and `--asm` includes the human-readable script assembly in the artifact.
+
+## Testing TypeScript Contracts
+
+Runar uses vitest for testing. A test file instantiates a contract, simulates method calls, and asserts on the results:
+
+```typescript
+import { expect, test } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { readFileSync } from 'node:fs';
+
+const source = readFileSync('./contracts/P2PKH.runar.ts', 'utf8');
+
+test('P2PKH unlock succeeds with correct key', () => {
+  const contract = TestContract.fromSource(source, {
+    pubKeyHash: 'ab'.repeat(10),
+  });
+  const result = contract.call('unlock', {
+    sig: '30' + 'aa'.repeat(35),
+    pubKey: '02' + 'bb'.repeat(32),
+  });
+  expect(result.success).toBe(true);
+});
+```
+
+Run tests with:
+
+```bash
+runar test
+```
+
+See [Writing Tests](/docs/en/testing-and-debugging/writing-tests) for a full testing guide.
+
+## Common Patterns
+
+### Hash Time-Lock Contract (HTLC)
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, Sha256, sha256, checkSig } from 'runar-lang';
+
+class HTLC extends SmartContract {
+  readonly seller: PubKey;
+  readonly buyer: PubKey;
+  readonly hashLock: Sha256;
+  readonly timeout: bigint;
+
+  constructor(seller: PubKey, buyer: PubKey, hashLock: Sha256, timeout: bigint) {
+    super(seller, buyer, hashLock, timeout);
+    this.seller = seller;
+    this.buyer = buyer;
+    this.hashLock = hashLock;
+    this.timeout = timeout;
+  }
+
+  // Seller reveals the preimage to claim funds
+  public claim(preimage: ByteString, sellerSig: Sig) {
+    assert(sha256(preimage) === this.hashLock);
+    assert(checkSig(sellerSig, this.seller));
+  }
+
+  // Buyer reclaims after timeout
+  public refund(buyerSig: Sig) {
+    assert(checkSig(buyerSig, this.buyer));
+    // Timeout enforcement would use nLocktime via preimage inspection
+  }
+}
+```
+
+### Accumulator (Stateful with Readonly Config)
+
+```typescript
+import { StatefulSmartContract, assert, PubKey, Sig, checkSig } from 'runar-lang';
+
+class Accumulator extends StatefulSmartContract {
+  readonly owner: PubKey;
+  total: bigint;
+  entries: bigint;
+
+  constructor(owner: PubKey) {
+    super();
+    this.owner = owner;
+    this.total = 0n;
+    this.entries = 0n;
+  }
+
+  public add(value: bigint, ownerSig: Sig) {
+    assert(checkSig(ownerSig, this.owner));
+    assert(value > 0n);
+    this.total = this.total + value;
+    this.entries = this.entries + 1n;
+    assert(true);
+  }
+
+  public reset(ownerSig: Sig) {
+    assert(checkSig(ownerSig, this.owner));
+    this.total = 0n;
+    this.entries = 0n;
+    assert(true);
+  }
+}
+```
+
+## Next Steps
+
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Go Contracts](/docs/en/writing-contracts/go-contracts) -- Write contracts in Go
+- [Language Feature Matrix](/docs/en/writing-contracts/language-feature-matrix) -- Compare all six languages
+- [Writing Tests](/docs/en/testing-and-debugging/writing-tests) -- Test your contracts

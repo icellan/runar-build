@@ -1,0 +1,424 @@
+---
+title: "Python Contracts"
+description: "Writing smart contracts in Python with Runar."
+section: "writing-contracts"
+order: 45
+lang: "en"
+---
+
+Python is a fully supported language for writing Runar smart contracts. Use familiar Python syntax -- classes, decorators, and type hints -- to define contracts that compile to Bitcoin Script. The Python frontend compiles through the same intermediate representation as all other Runar languages, producing identical Bitcoin Script output.
+
+## Prerequisites
+
+- **Python 3.10+** installed on your system
+- The `runar-py` package (installed automatically when using the Runar CLI with Python contracts)
+
+## File Extension and Module Structure
+
+Python contract files use the `.runar.py` extension. Each file contains exactly one contract class:
+
+```
+contracts/
+  p2pkh.runar.py
+  counter.runar.py
+  escrow.runar.py
+  tictactoe.runar.py
+```
+
+Every contract file begins with imports from the `runar` package:
+
+```python
+from runar import SmartContract, StatefulSmartContract, PubKey, Sig, Ripemd160, Readonly, public, assert_
+```
+
+The `runar` package provides the base contract classes, all on-chain types, the `@public` decorator, the `Readonly` type wrapper, and the `assert_()` function.
+
+## Stateless Contracts
+
+A stateless contract inherits from `SmartContract`. Readonly fields use the `Readonly[T]` type annotation. Public methods are decorated with `@public`.
+
+### P2PKH in Python
+
+```python
+from runar import SmartContract, PubKey, Sig, Ripemd160, Readonly, public, assert_, hash160, check_sig
+
+class P2PKH(SmartContract):
+    pub_key_hash: Readonly[Ripemd160]
+
+    def __init__(self, pub_key_hash: Ripemd160):
+        super().__init__(pub_key_hash)
+        self.pub_key_hash = pub_key_hash
+
+    @public
+    def unlock(self, sig: Sig, pub_key: PubKey):
+        assert_(hash160(pub_key) == self.pub_key_hash)
+        assert_(check_sig(sig, pub_key))
+```
+
+Key points:
+
+- **`Readonly[T]`** marks a field as immutable. It is baked into the locking script at deployment time. This is a type-level annotation, not a runtime wrapper.
+- **`@public`** decorator marks a method as a spending entry point. Methods without this decorator are private helpers that get inlined.
+- **`assert_()`** is the assertion function (with a trailing underscore to avoid shadowing Python's built-in `assert`). Every `@public` method must call it at least once.
+- **`__init__`** calls `super().__init__()` with all readonly values, following the same constructor pattern as TypeScript contracts.
+
+### Escrow in Python
+
+```python
+from runar import SmartContract, PubKey, Sig, Readonly, public, assert_, check_sig
+
+class Escrow(SmartContract):
+    buyer: Readonly[PubKey]
+    seller: Readonly[PubKey]
+    arbiter: Readonly[PubKey]
+
+    def __init__(self, buyer: PubKey, seller: PubKey, arbiter: PubKey):
+        super().__init__(buyer, seller, arbiter)
+        self.buyer = buyer
+        self.seller = seller
+        self.arbiter = arbiter
+
+    @public
+    def release(self, seller_sig: Sig, buyer_sig: Sig):
+        assert_(check_sig(seller_sig, self.seller))
+        assert_(check_sig(buyer_sig, self.buyer))
+
+    @public
+    def refund(self, buyer_sig: Sig, arbiter_sig: Sig):
+        assert_(check_sig(buyer_sig, self.buyer))
+        assert_(check_sig(arbiter_sig, self.arbiter))
+
+    @public
+    def arbitrate(self, seller_sig: Sig, arbiter_sig: Sig):
+        assert_(check_sig(seller_sig, self.seller))
+        assert_(check_sig(arbiter_sig, self.arbiter))
+```
+
+## Stateful Contracts
+
+A stateful contract inherits from `StatefulSmartContract`. Mutable fields use plain type annotations (without `Readonly`). The compiler automatically handles preimage verification and state continuation.
+
+### Counter in Python
+
+```python
+from runar import StatefulSmartContract, public, assert_
+
+class Counter(StatefulSmartContract):
+    count: int = 0
+
+    def __init__(self):
+        super().__init__()
+        self.count = 0
+
+    @public
+    def increment(self):
+        self.count = self.count + 1
+        assert_(True)
+
+    @public
+    def decrement(self):
+        assert_(self.count > 0)
+        self.count = self.count - 1
+        assert_(True)
+```
+
+Python's `int` type maps to `bigint` in the compiled output. All integers in Python are arbitrary-precision, which aligns naturally with Runar's numeric model.
+
+### TicTacToe: A Full Stateful Example
+
+This example demonstrates a stateful contract with both readonly and mutable fields, multiple public methods, and private helper methods.
+
+```python
+from runar import StatefulSmartContract, PubKey, Sig, Readonly, public, assert_, check_sig
+
+class TicTacToe(StatefulSmartContract):
+    alice: Readonly[PubKey]
+    bob: Readonly[PubKey]
+    c0: int = 0
+    c1: int = 0
+    c2: int = 0
+    c3: int = 0
+    c4: int = 0
+    c5: int = 0
+    c6: int = 0
+    c7: int = 0
+    c8: int = 0
+    is_alice_turn: bool = True
+
+    def __init__(self, alice: PubKey, bob: PubKey):
+        super().__init__()
+        self.alice = alice
+        self.bob = bob
+
+    @public
+    def move(self, sig: Sig, pos: int, player: int):
+        if self.is_alice_turn:
+            assert_(player == 1)
+            assert_(check_sig(sig, self.alice))
+        else:
+            assert_(player == 2)
+            assert_(check_sig(sig, self.bob))
+
+        assert_(self._get_cell(pos) == 0)
+        self._set_cell(pos, player)
+        self.is_alice_turn = not self.is_alice_turn
+
+        assert_(True)
+
+    def _get_cell(self, pos: int) -> int:
+        if pos == 0: return self.c0
+        if pos == 1: return self.c1
+        if pos == 2: return self.c2
+        if pos == 3: return self.c3
+        if pos == 4: return self.c4
+        if pos == 5: return self.c5
+        if pos == 6: return self.c6
+        if pos == 7: return self.c7
+        if pos == 8: return self.c8
+        return 0
+
+    def _set_cell(self, pos: int, value: int):
+        if pos == 0: self.c0 = value
+        if pos == 1: self.c1 = value
+        if pos == 2: self.c2 = value
+        if pos == 3: self.c3 = value
+        if pos == 4: self.c4 = value
+        if pos == 5: self.c5 = value
+        if pos == 6: self.c6 = value
+        if pos == 7: self.c7 = value
+        if pos == 8: self.c8 = value
+```
+
+Methods without the `@public` decorator (like `_get_cell` and `_set_cell`) are private helpers. The leading underscore follows Python convention for private members, but it is the absence of `@public` that determines visibility to the compiler. Private methods are inlined at each call site.
+
+## Types in Python Contracts
+
+The `runar` package provides all on-chain types. Python's `int` maps to `bigint` and `bool` maps to `boolean` in the compiled output.
+
+| Python Type | Equivalent TypeScript Type | Description |
+| --- | --- | --- |
+| `int` | `bigint` | Arbitrary-precision integer. The only numeric type. |
+| `bool` | `boolean` | Boolean values. |
+| `ByteString` | `ByteString` | Variable-length byte sequence. |
+| `PubKey` | `PubKey` | 33-byte compressed public key. |
+| `Sig` | `Sig` | DER-encoded signature (affine type -- consumed exactly once). |
+| `Sha256` | `Sha256` | 32-byte SHA-256 digest. |
+| `Ripemd160` | `Ripemd160` | 20-byte RIPEMD-160 digest. |
+| `Addr` | `Addr` | 20-byte address. |
+| `SigHashPreimage` | `SigHashPreimage` | Transaction preimage (affine type). |
+| `Point` | `Point` | 64-byte elliptic curve point. |
+| `RabinSig` | `RabinSig` | Rabin signature. |
+| `RabinPubKey` | `RabinPubKey` | Rabin public key. |
+| `FixedArray[T, N]` | `FixedArray<T, N>` | Fixed-size array. `N` must be a compile-time constant. |
+
+### The Readonly Type Wrapper
+
+`Readonly[T]` is a generic type annotation that marks a field as immutable:
+
+```python
+class MyContract(SmartContract):
+    owner: Readonly[PubKey]            # readonly public key
+    hash_lock: Readonly[Sha256]        # readonly hash
+    threshold: Readonly[int]           # readonly integer
+```
+
+In a `SmartContract`, all fields must use `Readonly[T]`. In a `StatefulSmartContract`, only fields that should be fixed at deployment use `Readonly[T]` -- mutable state fields use plain type annotations.
+
+### Fixed Arrays
+
+Use `FixedArray[T, N]` for fixed-size arrays:
+
+```python
+from runar import FixedArray
+
+class MultiSig(SmartContract):
+    signers: Readonly[FixedArray[PubKey, 3]]
+
+    @public
+    def unlock(self, sigs: FixedArray[Sig, 2]):
+        assert_(check_multi_sig(sigs, self.signers))
+```
+
+Python lists (`list[T]`) and other dynamic collections are not supported. All array sizes must be compile-time constants.
+
+## Built-in Functions
+
+All built-in functions are imported from the `runar` package. They follow Python's snake_case naming convention.
+
+### Cryptographic Functions
+
+```python
+from runar import check_sig, check_multi_sig, hash256, hash160, sha256, ripemd160, check_preimage
+
+check_sig(sig, pub_key)
+check_multi_sig(sigs, pub_keys)
+hash256(data)
+hash160(data)
+sha256(data)
+ripemd160(data)
+check_preimage(preimage)
+```
+
+### Byte Operations
+
+```python
+from runar import len_, cat, substr, left, right, split, reverse_bytes, to_byte_string
+
+length = len_(data)         # len_ to avoid shadowing built-in len
+combined = cat(a, b)
+chunk = substr(data, 0, 10)
+prefix = left(data, 4)
+suffix = right(data, 4)
+head, tail = split(data, 16)
+reversed_data = reverse_bytes(data)
+```
+
+Note that `len_()` has a trailing underscore to avoid shadowing Python's built-in `len`.
+
+### Conversion Functions
+
+```python
+from runar import num2bin, bin2num, int2str
+
+byte_val = num2bin(num, length)
+num_val = bin2num(data)
+str_val = int2str(num, byte_len)
+```
+
+### Math Functions
+
+```python
+from runar import abs_, min_, max_, within, safe_div, safe_mod, clamp, pow_, sqrt, gcd, divmod_
+
+distance = abs_(a - b)       # abs_ to avoid shadowing built-in
+smallest = min_(x, y)        # min_ to avoid shadowing built-in
+largest = max_(x, y)         # max_ to avoid shadowing built-in
+in_range = within(x, 10, 20)
+result = safe_div(a, b)
+bounded = clamp(value, 0, 100)
+root = sqrt(x)
+```
+
+Functions that would shadow Python built-ins use a trailing underscore: `abs_`, `min_`, `max_`, `pow_`, `len_`.
+
+### Control Functions
+
+```python
+from runar import assert_
+
+assert_(condition)
+```
+
+## Decorators Reference
+
+| Decorator | Target | Description |
+| --- | --- | --- |
+| `@public` | Method | Marks the method as a public entry point (spending condition). |
+
+The contract type (stateless or stateful) is determined by the base class (`SmartContract` or `StatefulSmartContract`), not by a decorator.
+
+## Control Flow
+
+### For Loops
+
+Only `for` loops with `range()` and compile-time constant bounds are allowed:
+
+```python
+total = 0
+for i in range(10):
+    total = total + balances[i]
+```
+
+The `range(10)` is unrolled at compile time, producing 10 copies of the loop body.
+
+### Conditionals
+
+Standard `if`/`elif`/`else` statements work:
+
+```python
+if amount > threshold:
+    self.balance = self.balance - amount
+elif amount == threshold:
+    self.balance = 0
+else:
+    assert_(False)
+```
+
+Python's ternary expression also works:
+
+```python
+fee = 10 if amount > 1000 else 1
+```
+
+### Disallowed Python Features
+
+The following Python features are not available in contracts:
+
+- `while` loops
+- Recursion
+- `async`/`await`
+- Lambda functions and closures
+- `try`/`except`/`finally`
+- List comprehensions, generator expressions, dictionary comprehensions
+- `*args` and `**kwargs`
+- Dynamic typing (all types must be annotated)
+- Standard library imports (only `runar` is allowed)
+- `class` methods and `static` methods
+- Properties (`@property`)
+- Multiple inheritance (except from `SmartContract` or `StatefulSmartContract`)
+- `dict`, `set`, `list` (dynamic collections)
+- `str` (use `ByteString`)
+- `float`, `complex` (use `int`)
+- `None` type
+- `type()`, `isinstance()`, `issubclass()`
+- `eval()`, `exec()`
+- F-strings and format strings
+- Walrus operator (`:=`)
+- `match`/`case` (structural pattern matching)
+- Decorators other than `@public`
+- Multiple classes per file
+
+## Compiling Python Contracts
+
+```bash
+runar compile contracts/counter.runar.py --output ./artifacts
+```
+
+The compiler invokes the `runar-py` frontend to parse the Python source, translates it to the shared IR, and produces the standard JSON artifact.
+
+To compile all Python contracts:
+
+```bash
+runar compile contracts/*.runar.py --output ./artifacts
+```
+
+## Testing Python Contracts
+
+Python contracts are tested using native Python tests with `pytest`. Use the `load_contract` helper from `conftest` to load the contract module, then instantiate and call contract methods directly. The `runar` package provides `hash160`, `mock_sig`, and `mock_pub_key` utilities for testing.
+
+```python
+from conftest import load_contract
+from runar import hash160, mock_sig, mock_pub_key
+
+contract_mod = load_contract("P2PKH.runar.py")
+P2PKH = contract_mod.P2PKH
+
+def test_unlock():
+    pk = mock_pub_key()
+    c = P2PKH(pub_key_hash=hash160(pk))
+    c.unlock(mock_sig(), pk)
+```
+
+You can also run tests via the Runar CLI:
+
+```bash
+runar test
+```
+
+See [Writing Tests](/docs/en/testing-and-debugging/writing-tests) for a comprehensive testing guide.
+
+## Next Steps
+
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Solidity Contracts](/docs/en/writing-contracts/solidity-contracts) -- Write contracts in Solidity syntax
+- [Language Feature Matrix](/docs/en/writing-contracts/language-feature-matrix) -- Compare all six languages

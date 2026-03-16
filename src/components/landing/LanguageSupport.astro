@@ -1,0 +1,19 @@
+---
+import SectionLabel from './SectionLabel.astro';
+import LanguageCard from './LanguageCard.astro';
+import { languages } from '@data/languages';
+---
+
+<section class="py-24 px-4">
+  <div class="max-w-6xl mx-auto">
+    <SectionLabel number="02" title="Languages" />
+    <p class="text-text-secondary text-lg mb-8 max-w-2xl">
+      Write contracts in the language you're most productive in. Rúnar compiles them all to the same optimized <span class="font-mono text-accent-500">Bitcoin Script</span>.
+    </p>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {languages.map(lang => (
+        <LanguageCard name={lang.name} status={lang.status} snippet={lang.snippet} />
+      ))}
+    </div>
+  </div>
+</section>

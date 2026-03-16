@@ -1,0 +1,62 @@
+---
+import Logo from './Logo.astro';
+import ThemeToggle from './ThemeToggle';
+import MobileMenu from './MobileMenu';
+import SearchDialog from '@components/docs/SearchDialog';
+
+interface Props {
+  variant?: 'landing' | 'docs';
+}
+
+const { variant = 'landing' } = Astro.props;
+
+const navItems = [
+  { label: 'Docs', href: '/docs/getting-started/overview' },
+  { label: 'Examples', href: '/docs/examples/gallery' },
+  { label: 'GitHub', href: 'https://github.com/icellan/runar' },
+];
+
+const isLanding = variant === 'landing';
+---
+
+<header class:list={[
+  'sticky top-0 z-30 w-full border-b transition-colors',
+  isLanding ? 'bg-bg/80 backdrop-blur-md border-transparent' : 'bg-bg/95 backdrop-blur-md border-border',
+]}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="flex items-center justify-between h-16">
+      <!-- Logo -->
+      <Logo />
+
+      <!-- Desktop nav -->
+      <nav class="hidden lg:flex items-center gap-1">
+        {navItems.map(item => (
+          <a
+            href={item.href}
+            class="px-3 py-2 text-sm text-text-secondary hover:text-text rounded-lg transition-colors"
+            {...(item.href.startsWith('http') ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+          >
+            {item.label}
+            {item.href.startsWith('http') && (
+              <svg class="inline-block ml-1 -mt-0.5" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+            )}
+          </a>
+        ))}
+        {!isLanding && <SearchDialog client:idle />}
+        <div class="w-px h-5 bg-border mx-2"></div>
+        <ThemeToggle client:load />
+      </nav>
+
+      <!-- Mobile -->
+      <div class="flex items-center gap-2 lg:hidden">
+        {!isLanding && <SearchDialog client:idle />}
+        <ThemeToggle client:load />
+        <MobileMenu client:load items={navItems} />
+      </div>
+    </div>
+  </div>
+</header>

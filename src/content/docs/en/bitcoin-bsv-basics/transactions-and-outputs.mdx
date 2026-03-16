@@ -1,0 +1,260 @@
+---
+title: "Transactions & Outputs"
+description: "Structure of BSV transactions."
+section: "bitcoin-bsv-basics"
+order: 30
+lang: "en"
+---
+
+BSV transactions are the vehicles that carry smart contract logic on-chain. Every contract deployment, every method call, every state transition --- all of these are expressed as transactions. This page breaks down the anatomy of a transaction and explains how inputs and outputs relate to contract execution.
+
+## Anatomy of a BSV Transaction
+
+A BSV transaction is a binary data structure with a well-defined format. At a high level, every transaction has four parts:
+
+```
+Transaction
++-----------+------------------------------------------+
+| nVersion  | 4 bytes --- transaction version number    |
++-----------+------------------------------------------+
+| vin[]     | Array of inputs                          |
++-----------+------------------------------------------+
+| vout[]    | Array of outputs                         |
++-----------+------------------------------------------+
+| nLockTime | 4 bytes --- earliest time/block for       |
+|           | inclusion in a block                     |
++-----------+------------------------------------------+
+```
+
+### Version (nVersion)
+
+The version field is 4 bytes and currently set to `1` or `2` for standard transactions. Version 2 enables `OP_CHECKSEQUENCEVERIFY` for relative time-locks. For most Runar contracts, this is set automatically.
+
+### Inputs (vin)
+
+Each input references a previously created UTXO and provides the data needed to spend it. An input has the following structure:
+
+```
+Input
++----------------+---------------------------------------------------+
+| outpoint       | 36 bytes: txid (32B) + output index (4B)          |
++----------------+---------------------------------------------------+
+| scriptSig      | Variable length: the unlocking script              |
++----------------+---------------------------------------------------+
+| nSequence      | 4 bytes: sequence number (used for time-locks      |
+|                | and transaction replacement)                       |
++----------------+---------------------------------------------------+
+```
+
+The **outpoint** (sometimes called the "previous output reference") is the key field. It consists of:
+
+- **txid** --- the 32-byte hash of the transaction that created the UTXO being spent.
+- **output index** (vout) --- a 4-byte integer indicating which output of that transaction this input is spending (zero-indexed).
+
+Together, the txid and output index uniquely identify any UTXO on the blockchain.
+
+The **scriptSig** (unlocking script) provides the arguments needed to satisfy the locking script of the referenced UTXO. For a Runar smart contract, this contains the method selector and method arguments, serialized by the SDK.
+
+### Outputs (vout)
+
+Each output creates a new UTXO with a value and a locking script. An output has the following structure:
+
+```
+Output
++----------------+---------------------------------------------------+
+| nValue         | 8 bytes: satoshi amount (as a 64-bit integer)     |
++----------------+---------------------------------------------------+
+| scriptPubKey   | Variable length: the locking script                |
++----------------+---------------------------------------------------+
+```
+
+The **nValue** field specifies how many satoshis are locked in this output. The minimum useful value is 1 satoshi (there is no concept of "zero-value" UTXOs for active contracts --- though `OP_RETURN` outputs with 0 satoshis are used for data storage).
+
+The **scriptPubKey** (locking script) is the Bitcoin Script program that defines the spending conditions. For a Runar contract, this is the compiled contract code.
+
+### Locktime (nLockTime)
+
+The locktime field specifies the earliest time (as a Unix timestamp or block height) at which the transaction can be included in a block. If set to `0` (the default), the transaction can be mined immediately.
+
+- Values less than 500,000,000 are interpreted as **block heights**.
+- Values greater than or equal to 500,000,000 are interpreted as **Unix timestamps**.
+
+Locktime is enforced at the consensus level and can be used in smart contracts to implement time-based conditions.
+
+## Inputs, Outputs, and Script Pairs
+
+The fundamental operation of a BSV transaction is **consuming existing UTXOs (inputs) and creating new UTXOs (outputs)**. This is how value flows through the system.
+
+### How Inputs Reference Previous Outputs
+
+Every input points back to a specific output from a specific previous transaction. This creates a chain of ownership:
+
+```
+Transaction T1 (Deployment)
+  Input 0: [funding UTXO from wallet]
+  Output 0: 10,000 sats | Locking script = Runar contract code
+  Output 1:  5,000 sats | Locking script = change back to deployer
+
+Transaction T2 (Contract call)
+  Input 0: T1:Output 0  | Unlocking script = method args + proof
+  Output 0:  9,800 sats | Locking script = updated contract (for stateful)
+  Output 1:    200 sats | Locking script = payment to some party
+
+Transaction T3 (Another contract call)
+  Input 0: T2:Output 0  | Unlocking script = next method call
+  Output 0:  9,600 sats | Locking script = updated contract again
+```
+
+Each transaction in this chain spends the previous contract UTXO and (for stateful contracts) creates a new one. This forms a **transaction chain** that represents the full history of a contract's state transitions.
+
+### The Validation Process
+
+When a miner receives a transaction, it validates each input independently:
+
+1. Look up the UTXO referenced by the input's outpoint.
+2. Verify the UTXO has not already been spent (it exists in the UTXO set).
+3. Execute the unlocking script, then execute the locking script on the resulting stack.
+4. If the script succeeds (non-zero value on top of stack), the input is valid.
+5. After all inputs are validated, verify that the total input value is greater than or equal to the total output value (the difference is the miner fee).
+
+If any input fails validation, the entire transaction is rejected.
+
+## Transaction Fees
+
+BSV transactions require fees to incentivize miners to include them in blocks. The fee is **implicit** --- it is the difference between the total value of all inputs and the total value of all outputs:
+
+```
+fee = sum(input values) - sum(output values)
+```
+
+There is no explicit fee field in the transaction format. For example:
+
+```
+Transaction:
+  Input 0: 10,000 sats (from some UTXO)
+  Output 0:  8,000 sats (contract UTXO)
+  Output 1:  1,500 sats (change to sender)
+  ---
+  Fee: 10,000 - (8,000 + 1,500) = 500 sats
+```
+
+### Fee Rate
+
+BSV miners typically accept transactions with fees at or above a minimum **fee rate**, measured in satoshis per byte of transaction data. The standard rate is 100 satoshis per kilobyte (0.1 sat/byte), which the Runar SDK uses as its default.
+
+Larger transactions (more inputs, more outputs, larger scripts) require proportionally higher fees. Smart contract transactions tend to be larger than simple payment transactions because the locking scripts contain contract logic rather than simple P2PKH templates.
+
+### Change Outputs
+
+When the total input value exceeds the intended output value plus fees, the transaction must include a **change output** that sends the excess value back to the sender. The Runar SDK handles change output creation automatically.
+
+```
+Input: 50,000 sats
+Desired output: 10,000 sats to contract
+Fee: 300 sats
+Change output: 50,000 - 10,000 - 300 = 39,700 sats back to sender
+```
+
+Forgetting to include a change output means the entire excess value becomes the miner fee. The Runar SDK protects against this, but it is important to understand the mechanism.
+
+## Transaction Serialization Format
+
+Transactions are serialized into a raw byte sequence for transmission over the network and for hashing (to compute the txid). The serialization follows a strict format:
+
+```
+[nVersion]           4 bytes, little-endian
+[input count]        varint (1-9 bytes)
+[inputs]             serialized sequentially:
+  [txid]               32 bytes, little-endian
+  [vout]               4 bytes, little-endian
+  [scriptSig length]   varint
+  [scriptSig]          variable
+  [nSequence]          4 bytes, little-endian
+[output count]       varint (1-9 bytes)
+[outputs]            serialized sequentially:
+  [nValue]             8 bytes, little-endian
+  [scriptPubKey length] varint
+  [scriptPubKey]        variable
+[nLockTime]          4 bytes, little-endian
+```
+
+The **varint** (variable-length integer) encoding is used for counts and lengths. Values 0-252 use 1 byte, larger values use 3, 5, or 9 bytes with a prefix indicator.
+
+The **txid** (transaction identifier) is computed as the double SHA-256 hash of this serialized data:
+
+```
+txid = sha256(sha256(raw_transaction_bytes))
+```
+
+The txid is how transactions are referenced throughout the system --- in input outpoints, in block merkle trees, and in APIs.
+
+## Signature Hashing and SIGHASH Flags
+
+When a script executes `OP_CHECKSIG` to verify a signature, the signature is not over the raw transaction bytes. Instead, it is over a **sighash** --- a specially constructed hash of a modified version of the transaction. The sighash algorithm determines which parts of the transaction the signature commits to.
+
+### BIP-143 Sighash (Used by BSV)
+
+BSV uses the BIP-143 sighash algorithm, which constructs a **preimage** --- a structured byte sequence --- that is then hashed for signature verification. The preimage contains:
+
+| Field | Size | Description |
+|---|---|---|
+| nVersion | 4 bytes | Transaction version |
+| hashPrevouts | 32 bytes | Hash of all input outpoints |
+| hashSequence | 32 bytes | Hash of all input sequence numbers |
+| outpoint | 36 bytes | The specific outpoint being signed |
+| scriptCode | variable | The locking script being executed |
+| value | 8 bytes | Satoshi value of the UTXO being spent |
+| nSequence | 4 bytes | Sequence number of the input being signed |
+| hashOutputs | 32 bytes | Hash of all outputs |
+| nLockTime | 4 bytes | Transaction locktime |
+| sigHashType | 4 bytes | Sighash flag |
+
+This preimage structure is critically important for smart contracts because it contains information about the spending transaction --- including `hashOutputs`, which is a hash of all outputs. This is the basis of the **OP_PUSH_TX** technique that enables stateful contracts (covered in detail on the next page).
+
+### SIGHASH Flags
+
+The sighash type byte at the end of a signature specifies which parts of the transaction the signature covers:
+
+| Flag | Base Value | With FORKID | Signs |
+|---|---|---|---|
+| `SIGHASH_ALL` | `0x01` | `0x41` | All inputs and all outputs |
+| `SIGHASH_NONE` | `0x02` | `0x42` | All inputs, no outputs |
+| `SIGHASH_SINGLE` | `0x03` | `0x43` | All inputs, only the output at the same index |
+| `SIGHASH_ANYONECANPAY` | `0x80` (modifier) | Combined with above | Only the current input (combined with above) |
+
+BSV requires the `SIGHASH_FORKID` bit (`0x40`) to be set on all signatures. This means the values you will encounter in practice are `0x41`, `0x42`, `0x43`, etc. The most common flag is `SIGHASH_ALL | SIGHASH_FORKID` (`0x41`), which is the default for Runar contracts. It commits to every part of the transaction, ensuring nothing can be modified after signing.
+
+Other flags have specialized uses: `SIGHASH_ANYONECANPAY` allows additional inputs to be added after signing (useful for crowdfunding-style contracts), and `SIGHASH_SINGLE` allows outputs other than the matched one to be modified.
+
+## How Runar Constructs Transactions
+
+When you deploy or interact with a Runar contract using the SDK, the transaction construction is handled automatically. Here is what happens under the hood:
+
+### Deployment Transaction
+
+When you deploy a contract, the SDK builds a transaction that:
+
+1. **Selects input UTXOs** from your wallet with sufficient value to fund the contract plus fees.
+2. **Constructs the locking script** by serializing the compiled contract code and initial state parameters.
+3. **Creates the contract output** with the specified satoshi amount and the locking script.
+4. **Creates a change output** returning excess value to your wallet.
+5. **Signs the inputs** with your private key.
+6. **Broadcasts** the raw transaction to the BSV network.
+
+### Contract Call Transaction
+
+When you call a method on a deployed contract, the SDK:
+
+1. **Fetches the current contract UTXO** (the latest unspent output in the contract's chain).
+2. **Constructs the unlocking script** with the method selector and arguments.
+3. **Builds the appropriate outputs** --- for stateful contracts, this includes a new contract UTXO with updated state; for stateless contracts, the outputs are defined by the contract logic.
+4. **Adds funding inputs** if the existing contract UTXO does not have enough value to cover the outputs and fees.
+5. **Signs and broadcasts** the transaction.
+
+The key insight is that every contract interaction is a transaction, and every transaction must balance: total input value must equal total output value plus fee. The SDK manages this bookkeeping so you can focus on your contract logic.
+
+## Next Steps
+
+- [How Smart Contracts Work on BSV](/docs/bitcoin-bsv-basics/how-smart-contracts-work-on-bsv) -- tying together UTXOs, Script, and transactions into the full contract execution model, including the OP_PUSH_TX technique for stateful contracts
+- [The UTXO Model](/docs/bitcoin-bsv-basics/utxo-model) -- foundational understanding of unspent transaction outputs
+- [Bitcoin Script](/docs/bitcoin-bsv-basics/bitcoin-script) -- the opcode-level language that transactions execute

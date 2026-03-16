@@ -1,0 +1,452 @@
+---
+title: "Move Contracts"
+description: "Writing contracts in Move."
+section: "writing-contracts"
+order: 60
+lang: "en"
+---
+
+Move's resource-oriented programming model maps naturally to the UTXO paradigm. Runar compiles Move modules to Bitcoin Script, preserving Move's safety guarantees around resource ownership and linearity. The Move frontend is part of the `runar-lang` package and compiles through the same intermediate representation as all other Runar languages.
+
+## Prerequisites
+
+- **Node.js >= 20** and **pnpm 9.15+** (the Move frontend is part of the `runar-lang` package)
+- No separate Move compiler is needed -- Runar handles `.runar.move` files directly
+
+## File Extension and Module Structure
+
+Move contract files use the `.runar.move` extension. Each file contains a single `module` with one struct and its associated functions:
+
+```
+contracts/
+  p2pkh.runar.move
+  counter.runar.move
+  escrow.runar.move
+  tictactoe.runar.move
+```
+
+Every contract is defined as a module:
+
+```move
+module p2pkh {
+    use runar::*;
+
+    // struct and functions here
+}
+```
+
+The `use runar::*` import brings in all on-chain types and built-in functions.
+
+## Resource Structs and the UTXO Connection
+
+Move's concept of **resources** -- values that cannot be copied or discarded, only moved -- aligns naturally with the UTXO model where each output is consumed exactly once. In Runar Move contracts, the contract struct is a resource that represents the UTXO.
+
+A struct with the `has key` ability is a resource that can be stored on-chain:
+
+```move
+struct P2PKH has key {
+    pub_key_hash: Ripemd160,
+}
+```
+
+The `has key` ability marks this struct as the contract's on-chain representation. Fields within the struct become the contract's state.
+
+## Stateless Contracts
+
+A stateless contract is a module with a `has key` struct where all fields are conceptually readonly (fixed at creation). Public functions define the spending conditions.
+
+### P2PKH in Move
+
+```move
+module p2pkh {
+    use runar::*;
+
+    struct P2PKH has key {
+        pub_key_hash: Ripemd160,
+    }
+
+    public fun unlock(self: &P2PKH, sig: Sig, pub_key: PubKey) {
+        assert!(hash160(&pub_key) == self.pub_key_hash);
+        assert!(check_sig(&sig, &pub_key));
+    }
+}
+```
+
+Key points:
+
+- **`module`** defines the contract's namespace. Module names follow Move's lowercase convention.
+- **`struct ... has key`** defines the on-chain resource. The `has key` ability is required for all contract structs.
+- **`public fun`** defines a spending entry point. Functions without `public` are private helpers that get inlined.
+- **`self: &P2PKH`** -- Stateless methods take an immutable reference to the contract struct.
+- **`assert!()`** is the assertion macro. Every public function must include at least one assertion.
+
+### Escrow in Move
+
+```move
+module escrow {
+    use runar::*;
+
+    struct Escrow has key {
+        buyer: PubKey,
+        seller: PubKey,
+        arbiter: PubKey,
+    }
+
+    public fun release(self: &Escrow, seller_sig: Sig, buyer_sig: Sig) {
+        assert!(check_sig(&seller_sig, &self.seller));
+        assert!(check_sig(&buyer_sig, &self.buyer));
+    }
+
+    public fun refund(self: &Escrow, buyer_sig: Sig, arbiter_sig: Sig) {
+        assert!(check_sig(&buyer_sig, &self.buyer));
+        assert!(check_sig(&arbiter_sig, &self.arbiter));
+    }
+
+    public fun arbitrate(self: &Escrow, seller_sig: Sig, arbiter_sig: Sig) {
+        assert!(check_sig(&seller_sig, &self.seller));
+        assert!(check_sig(&arbiter_sig, &self.arbiter));
+    }
+}
+```
+
+## Stateful Contracts
+
+A stateful contract takes a mutable reference (`&mut Self`) in its public functions, signaling that state can change. The compiler automatically injects the OP_PUSH_TX preimage verification and state continuation logic.
+
+### Counter in Move
+
+```move
+module counter {
+    use runar::*;
+
+    struct Counter has key {
+        count: u64,
+    }
+
+    public fun increment(self: &mut Counter) {
+        self.count = self.count + 1;
+        assert!(true);
+    }
+
+    public fun decrement(self: &mut Counter) {
+        assert!(self.count > 0);
+        self.count = self.count - 1;
+        assert!(true);
+    }
+}
+```
+
+The distinction between stateless and stateful is determined by whether public functions take `&self` (immutable reference, stateless) or `&mut self` (mutable reference, stateful). If any public function takes `&mut self`, the contract is treated as stateful.
+
+### TicTacToe in Move
+
+A more complete stateful example:
+
+```move
+module tic_tac_toe {
+    use runar::*;
+
+    struct TicTacToe has key {
+        alice: PubKey,
+        bob: PubKey,
+        c0: u64,
+        c1: u64,
+        c2: u64,
+        c3: u64,
+        c4: u64,
+        c5: u64,
+        c6: u64,
+        c7: u64,
+        c8: u64,
+        is_alice_turn: bool,
+    }
+
+    public fun move_piece(self: &mut TicTacToe, sig: Sig, pos: u64, player: u64) {
+        if (self.is_alice_turn) {
+            assert!(player == 1);
+            assert!(check_sig(&sig, &self.alice));
+        } else {
+            assert!(player == 2);
+            assert!(check_sig(&sig, &self.bob));
+        };
+
+        assert!(get_cell(self, pos) == 0);
+        set_cell(self, pos, player);
+        self.is_alice_turn = !self.is_alice_turn;
+
+        assert!(true);
+    }
+
+    fun get_cell(self: &TicTacToe, pos: u64): u64 {
+        if (pos == 0) { return self.c0 };
+        if (pos == 1) { return self.c1 };
+        if (pos == 2) { return self.c2 };
+        if (pos == 3) { return self.c3 };
+        if (pos == 4) { return self.c4 };
+        if (pos == 5) { return self.c5 };
+        if (pos == 6) { return self.c6 };
+        if (pos == 7) { return self.c7 };
+        if (pos == 8) { return self.c8 };
+        0
+    }
+
+    fun set_cell(self: &mut TicTacToe, pos: u64, value: u64) {
+        if (pos == 0) { self.c0 = value; };
+        if (pos == 1) { self.c1 = value; };
+        if (pos == 2) { self.c2 = value; };
+        if (pos == 3) { self.c3 = value; };
+        if (pos == 4) { self.c4 = value; };
+        if (pos == 5) { self.c5 = value; };
+        if (pos == 6) { self.c6 = value; };
+        if (pos == 7) { self.c7 = value; };
+        if (pos == 8) { self.c8 = value; };
+    }
+}
+```
+
+Private functions (`fun` without `public`) like `get_cell` and `set_cell` are inlined at their call sites during compilation.
+
+## Readonly Fields in Move
+
+Move does not have a `readonly` keyword like TypeScript. Instead, the distinction between readonly and mutable fields is determined by usage:
+
+- If a public function takes `&self` (immutable reference), all fields are effectively readonly.
+- If a public function takes `&mut self`, fields that are never modified in any public function are treated as readonly by the compiler.
+
+For clarity, you can annotate fields with a comment indicating their intent:
+
+```move
+struct Auction has key {
+    // readonly: set at creation, never modified
+    auctioneer: PubKey,
+    min_bid: u64,
+
+    // mutable state
+    highest_bidder: PubKey,
+    highest_bid: u64,
+}
+```
+
+The compiler determines readonly vs. mutable based on static analysis of all public methods.
+
+## Types in Move Contracts
+
+The `runar` module provides all on-chain types. Move uses `u64` for unsigned integers and provides no signed integer type (use `u64` and handle sign logic manually if needed).
+
+| Move Type | Equivalent TypeScript Type | Description |
+| --- | --- | --- |
+| `u64` | `bigint` | Unsigned 64-bit integer. The primary numeric type. |
+| `bool` | `boolean` | Boolean values. |
+| `ByteString` | `ByteString` | Variable-length byte sequence. |
+| `PubKey` | `PubKey` | 33-byte compressed public key. |
+| `Sig` | `Sig` | DER-encoded signature (affine type -- consumed exactly once). |
+| `Sha256` | `Sha256` | 32-byte SHA-256 digest. |
+| `Ripemd160` | `Ripemd160` | 20-byte RIPEMD-160 digest. |
+| `Addr` | `Addr` | 20-byte address. |
+| `SigHashPreimage` | `SigHashPreimage` | Transaction preimage (affine type). |
+| `Point` | `Point` | 64-byte elliptic curve point. |
+| `RabinSig` | `RabinSig` | Rabin signature. |
+| `RabinPubKey` | `RabinPubKey` | Rabin public key. |
+| `vector<T>` (fixed) | `FixedArray<T, N>` | Fixed-size vector. Size must be a compile-time constant. |
+
+### Vectors
+
+Move uses `vector<T>` for array types, but in Runar contracts, vectors must have a fixed size known at compile time:
+
+```move
+struct MultiSig has key {
+    signers: vector<PubKey>,   // size fixed at creation
+}
+
+public fun unlock(self: &MultiSig, sigs: vector<Sig>) {
+    assert!(check_multi_sig(&sigs, &self.signers));
+}
+```
+
+Dynamic vector operations like `push_back` and `pop_back` are not supported.
+
+## Built-in Functions
+
+All built-in functions are available through the `runar` module. They follow Move's snake_case naming convention.
+
+### Cryptographic Functions
+
+```move
+check_sig(&sig, &pub_key)
+check_multi_sig(&sigs, &pub_keys)
+hash256(&data)
+hash160(&data)
+sha256(&data)
+ripemd160(&data)
+check_preimage(&preimage)
+```
+
+### Byte Operations
+
+```move
+len(&data)
+cat(&a, &b)
+substr(&data, start, length)
+left(&data, length)
+right(&data, length)
+split(&data, position)
+reverse_bytes(&data)
+to_byte_string(&value)
+```
+
+### Math Functions
+
+```move
+abs(x)
+min(a, b)
+max(a, b)
+within(x, low, high)
+safe_div(a, b)
+safe_mod(a, b)
+clamp(x, low, high)
+pow(base, exp)
+sqrt(x)
+gcd(a, b)
+```
+
+### Control Functions
+
+```move
+assert!(condition);    // Move's built-in assertion macro
+```
+
+## Resource Safety and Affine Types
+
+Move's resource model provides built-in safety guarantees that align with Runar's affine types:
+
+**Resources cannot be copied.** A struct with `has key` cannot be duplicated. This mirrors the UTXO model where each output can only be spent once.
+
+**Affine values must be consumed.** `Sig` and `SigHashPreimage` values must be used exactly once, matching Move's ownership semantics -- once a value is moved, it cannot be used again:
+
+```move
+// CORRECT: sig is consumed once
+public fun unlock(self: &P2PKH, sig: Sig, pub_key: PubKey) {
+    assert!(check_sig(&sig, &pub_key));   // sig consumed here
+}
+
+// ERROR: sig would need to be used twice
+public fun bad_unlock(self: &P2PKH, sig: Sig, pk1: PubKey, pk2: PubKey) {
+    assert!(check_sig(&sig, &pk1));   // sig consumed here
+    assert!(check_sig(&sig, &pk2));   // error: sig already moved
+}
+```
+
+## Control Flow
+
+### For Loops
+
+Move uses `while` loops in standard code, but in Runar contracts only index-based loops with compile-time constant bounds are allowed:
+
+```move
+let mut sum: u64 = 0;
+let mut i: u64 = 0;
+while (i < 10) {   // bound must be a compile-time constant
+    sum = sum + balances[i];
+    i = i + 1;
+};
+```
+
+Despite `while` being the keyword, the compiler requires the loop bound to be a constant and unrolls the loop at compile time.
+
+### Conditionals
+
+Standard `if`/`else` expressions:
+
+```move
+if (amount > threshold) {
+    self.balance = self.balance - amount;
+} else {
+    assert!(false);
+};
+```
+
+Move's `if` is an expression, so it can return values:
+
+```move
+let fee: u64 = if (amount > 1000) { 10 } else { 1 };
+```
+
+### Disallowed Move Features
+
+The following Move features are not available in Runar contracts:
+
+- `ability` declarations other than `has key` (no `store`, `copy`, `drop` on contract structs)
+- `friend` modules
+- Multiple modules per file
+- Module-to-module calls
+- `native` functions
+- Generics on contract structs
+- `use` imports from modules other than `runar`
+- Script blocks (`script { }`)
+- Dynamic vector operations (`push_back`, `pop_back`, `length`, `borrow`)
+- `move_to`, `move_from`, `borrow_global`, `borrow_global_mut` (global storage operations)
+- `signer` type and operations
+- `spec` blocks (formal verification specs)
+- Recursion
+- Unbounded loops
+
+## Compiling Move Contracts
+
+```bash
+runar compile contracts/counter.runar.move --output ./artifacts
+```
+
+The compiler's Move frontend parses the `.runar.move` file, translates it to the shared IR, and produces the standard JSON artifact.
+
+To compile all Move contracts:
+
+```bash
+runar compile contracts/*.runar.move --output ./artifacts
+```
+
+## Testing Move Contracts
+
+Since the Move frontend produces the same JSON artifacts as all other languages, tests are written in TypeScript using vitest:
+
+```typescript
+import { expect, test } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { readFileSync } from 'node:fs';
+
+const source = readFileSync('./contracts/Counter.runar.move', 'utf8');
+
+test('Counter increment', () => {
+  const counter = TestContract.fromSource(source, { count: 0n }, 'Counter.runar.move');
+  counter.call('increment', {});
+  expect(counter.state.count).toBe(1n);
+});
+
+test('Counter decrement at zero fails', () => {
+  const counter = TestContract.fromSource(source, { count: 0n }, 'Counter.runar.move');
+  const result = counter.call('decrement', {});
+  expect(result.success).toBe(false);
+});
+```
+
+Run tests with:
+
+```bash
+runar test
+```
+
+## Why Move for Bitcoin Contracts
+
+Move was designed from the ground up for safe asset handling. Several of its core properties make it particularly well-suited for UTXO-based smart contracts:
+
+- **Linear types** prevent double-spending at the language level. A resource cannot be duplicated, just as a UTXO cannot be spent twice.
+- **No dynamic dispatch** eliminates an entire class of reentrancy vulnerabilities. Function calls are always statically resolved.
+- **Explicit resource management** forces developers to think about ownership and consumption, which maps directly to the UTXO spend-and-create model.
+- **Strong static typing** catches errors at compile time rather than at execution time on-chain.
+
+If you are familiar with Move from Sui or Aptos development, Runar's Move frontend will feel natural. The key adjustment is understanding that "resources" are UTXOs and "moving a resource" is spending a UTXO and creating a new one.
+
+## Next Steps
+
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Language Feature Matrix](/docs/en/writing-contracts/language-feature-matrix) -- Compare all six languages
+- [Covenant Architecture](/docs/en/advanced/covenant-architecture) -- Understand the OP_PUSH_TX pattern that powers stateful contracts

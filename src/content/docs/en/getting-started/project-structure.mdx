@@ -1,0 +1,222 @@
+---
+title: "Project Structure"
+description: "Understanding a Runar project layout."
+section: "getting-started"
+order: 40
+lang: "en"
+---
+
+Every Rúnar project follows a consistent directory layout that separates contract source code, compiled artifacts, tests, and configuration. Whether you scaffold a project with `runar init` or set one up manually, this structure keeps things organized as your project grows.
+
+## Top-Level Directory Layout
+
+A typical Rúnar project looks like this:
+
+```
+my-project/
+├── src/
+│   └── contracts/
+│       ├── P2PKH.runar.ts
+│       ├── Token.runar.ts
+│       └── Escrow.runar.ts
+├── artifacts/
+│   ├── P2PKH.json
+│   ├── Token.json
+│   └── Escrow.json
+├── tests/
+│   ├── P2PKH.test.ts
+│   ├── Token.test.ts
+│   └── Escrow.test.ts
+├── package.json
+└── tsconfig.json
+```
+
+Each directory has a specific purpose:
+
+| Directory / File | Purpose |
+| ---------------- | ------- |
+| `src/contracts/` | Contract source files (`.runar.ts`, `.runar.go`, etc.) |
+| `artifacts/`     | Compiled JSON artifacts produced by `runar compile` |
+| `tests/`         | Test files executed by `runar test` |
+| `package.json`   | Project dependencies and scripts |
+| `tsconfig.json`  | TypeScript configuration for contracts and tests |
+
+## The Contracts Directory
+
+The `src/contracts/` directory contains your contract source files. Each file defines one or more contract classes.
+
+### File Extension Convention
+
+Rúnar uses a double extension to identify contract files. The first extension indicates the language, and the `.runar` prefix signals to the compiler that this file should be processed:
+
+| Extension     | Language   | Example               |
+| ------------- | ---------- | --------------------- |
+| `.runar.ts`   | TypeScript | `P2PKH.runar.ts`      |
+| `.runar.go`   | Go         | `P2PKH.runar.go`      |
+| `.runar.rs`   | Rust       | `P2PKH.runar.rs`      |
+| `.runar.py`   | Python     | `P2PKH.runar.py`      |
+| `.runar.sol`  | Solidity   | `P2PKH.runar.sol`     |
+| `.runar.move` | Move       | `P2PKH.runar.move`    |
+
+The double extension serves two purposes. First, it lets the compiler identify which language frontend to use. Second, it means your editor treats the file as a normal TypeScript, Go, Rust, or Python file -- you get full syntax highlighting, autocomplete, and error checking without any special configuration.
+
+You can organize contracts into subdirectories if your project is large:
+
+```
+src/contracts/
+├── tokens/
+│   ├── FungibleToken.runar.ts
+│   └── NFT.runar.ts
+├── governance/
+│   └── Voting.runar.ts
+└── P2PKH.runar.ts
+```
+
+When compiling, pass the paths directly or use a glob pattern:
+
+```bash
+runar compile src/contracts/**/*.runar.ts --output ./artifacts
+```
+
+## Configuration Files
+
+### package.json
+
+Projects scaffolded with `runar init` include pre-configured scripts:
+
+```json
+{
+  "name": "my-project",
+  "private": true,
+  "scripts": {
+    "compile": "runar compile src/contracts/*.runar.ts --output ./artifacts",
+    "test": "runar test",
+    "deploy": "runar deploy"
+  },
+  "dependencies": {
+    "runar-lang": "^0.1.0",
+    "runar-sdk": "^0.1.0"
+  },
+  "devDependencies": {
+    "runar-cli": "^0.1.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}
+```
+
+### tsconfig.json
+
+The TypeScript configuration is set up for contract development. The key settings ensure that `runar-lang` types are available and that the compiler can resolve imports correctly.
+
+## Build Output and Artifacts
+
+The `artifacts/` directory contains the compiled output from `runar compile`. Each contract produces a single JSON file named after the contract class.
+
+### Artifact Format
+
+A compiled artifact contains everything needed to deploy, interact with, and verify a contract:
+
+```json
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "P2PKH",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "pubKeyHash", "type": "Addr" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "unlock",
+        "params": [
+          { "name": "sig", "type": "Sig" },
+          { "name": "pubKey", "type": "PubKey" }
+        ]
+      }
+    ]
+  },
+  "script": "76a91488ac",
+  "asm": "OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG",
+  "sourceMap": {
+    "mappings": [
+      { "opcodeIndex": 0, "sourceFile": "src/contracts/P2PKH.runar.ts", "line": 10, "column": 4 }
+    ]
+  },
+  "ir": { ... },
+  "stateFields": [
+    { "name": "pubKeyHash", "type": "Addr", "index": 0 }
+  ],
+  "constructorSlots": [
+    { "paramIndex": 0, "byteOffset": 3 }
+  ],
+  "buildTimestamp": "2026-03-15T10:30:00Z"
+}
+```
+
+### Artifact Field Reference
+
+| Field | Description |
+| ----- | ----------- |
+| `version` | Artifact format version. Currently `"runar-v0.1.0"`. |
+| `compilerVersion` | Version of the Rúnar compiler that produced this artifact. |
+| `contractName` | The name of the contract class. |
+| `abi` | The contract's interface: constructor parameters and public methods with their typed arguments. Used by the SDK and codegen tools to build transactions. |
+| `script` | The compiled Bitcoin Script as a hex string. Constructor parameter placeholders are filled in at deployment via `constructorSlots`. |
+| `asm` | Human-readable assembly representation of the script. Always present in the artifact. |
+| `sourceMap` | Maps opcodes back to source code locations via an array of mappings, each containing `opcodeIndex`, `sourceFile`, `line`, and `column`. Used by the interactive debugger (`runar debug`) and verbose test output to correlate opcodes with source lines. |
+| `ir` | The intermediate representation of the contract. Only present if compiled with `--ir`. Useful for inspecting how the compiler translates high-level code. |
+| `stateFields` | For `StatefulSmartContract` only. Describes the mutable state fields, including `name`, `type`, and `index`. Empty array for stateless contracts. |
+| `constructorSlots` | Contains `paramIndex` and `byteOffset` for each constructor parameter placeholder. The SDK uses this to substitute placeholders in the `script` field with actual values at deployment. |
+| `buildTimestamp` | ISO 8601 timestamp of when the artifact was compiled. |
+
+### Artifact Best Practices
+
+- **Commit artifacts to version control.** Because compilation is deterministic, artifacts serve as a verifiable record of what was deployed. Having them in git makes it easy to verify on-chain contracts later.
+- **Regenerate after source changes.** Always recompile after modifying contract source. Stale artifacts will not match the source and will cause verification failures.
+- **Use `--ir` for debugging.** The intermediate representation shows the compiler's internal model of your contract, which can help diagnose unexpected behavior.
+
+## Tests and Fixtures
+
+The `tests/` directory contains test files that exercise your contracts. Rúnar uses [vitest](https://vitest.dev/) as its test runner, invoked through `runar test`.
+
+Test files follow the naming convention `<ContractName>.test.ts`. Each test typically:
+
+1. Loads a contract from source using `TestContract.fromSource()`
+2. Creates an instance with constructor arguments
+3. Calls public methods with test arguments
+4. Asserts success or failure
+
+```
+tests/
+├── P2PKH.test.ts
+├── Token.test.ts
+├── Escrow.test.ts
+└── fixtures/
+    └── test-keys.ts
+```
+
+The optional `fixtures/` subdirectory is a good place to put shared test utilities like key generation helpers, common contract instances, or mock data.
+
+Tests run entirely locally -- no BSV node or network connection is needed. The `runar-testing` package includes a local Bitcoin Script interpreter that executes contracts in an isolated environment.
+
+## Multi-Language Projects
+
+A single project can contain contracts written in different languages. The compiler detects the language from the file extension and routes each file to the appropriate frontend:
+
+```
+src/contracts/
+├── P2PKH.runar.ts       # TypeScript frontend
+├── Token.runar.go        # Go frontend
+└── Escrow.runar.rs       # Rust frontend
+```
+
+All frontends produce the same artifact format, so the SDK, testing utilities, and deployment tools work identically regardless of which language the contract was written in.
+
+## Next Steps
+
+- [Quick Start](/docs/en/getting-started/quick-start) -- Build and deploy your first contract
+- [Output Artifacts](/docs/en/compiler/output-artifacts) -- Deep dive into the artifact format
+- [Writing Tests](/docs/en/testing-and-debugging/writing-tests) -- Advanced testing patterns

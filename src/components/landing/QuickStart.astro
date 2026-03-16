@@ -1,0 +1,17 @@
+---
+import SectionLabel from './SectionLabel.astro';
+import CodeStepper from './CodeStepper';
+---
+
+<section class="py-24 px-4">
+  <div class="max-w-4xl mx-auto">
+    <SectionLabel number="04" title="Quick Start" />
+    <p class="text-text-secondary text-lg mb-8 max-w-2xl">
+      From source code to a deployed contract in three steps.
+    </p>
+    <CodeStepper client:visible />
+    <p class="mt-6 text-sm text-text-tertiary">
+      <a href="/docs/tutorials/hello-world" class="text-accent-500 hover:underline">Follow the full tutorial &rarr;</a>
+    </p>
+  </div>
+</section>

@@ -1,0 +1,47 @@
+---
+import SectionLabel from './SectionLabel.astro';
+---
+
+<section class="py-24 px-4">
+  <div class="max-w-6xl mx-auto">
+    <SectionLabel number="05" title="How It Works" />
+    <p class="text-text-secondary text-lg mb-12 max-w-2xl">
+      Rúnar transforms high-level contract code into optimized Bitcoin Script through a multi-stage compilation pipeline.
+    </p>
+
+    <!-- Pipeline diagram -->
+    <div class="flex flex-col md:flex-row items-stretch gap-0 overflow-x-auto pb-4">
+      {[
+        { label: 'Source Code', sub: 'TS / Go / Rust', color: 'text-accent-500' },
+        { label: 'Parser', sub: 'Language-specific', color: 'text-text-secondary' },
+        { label: 'AST', sub: 'Typed tree', color: 'text-text-secondary' },
+        { label: 'IR', sub: 'Intermediate repr', color: 'text-text-secondary' },
+        { label: 'Optimizer', sub: 'Size & gas', color: 'text-text-secondary' },
+        { label: 'Bitcoin Script', sub: 'OP_CODES', color: 'text-accent-500' },
+      ].map((stage, i, arr) => (
+        <div class="flex items-center">
+          <div class="flex flex-col items-center text-center px-4 py-6 min-w-[120px]">
+            <div class:list={['font-mono text-sm font-semibold', stage.color]}>{stage.label}</div>
+            <div class="text-xs text-text-tertiary mt-1">{stage.sub}</div>
+          </div>
+          {i < arr.length - 1 && (
+            <div class="hidden md:block text-text-tertiary px-1">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6" />
+              </svg>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+
+    <div class="mt-8 p-6 rounded-xl bg-surface border border-border">
+      <p class="text-sm text-text-secondary leading-relaxed">
+        Each source language has its own parser, but all converge on a shared intermediate representation (IR). The optimizer works on this IR to minimize script size and execution cost before emitting final Bitcoin Script opcodes. The result is a deterministic, auditable output that can be deployed directly to BSV.
+      </p>
+      <a href="/docs/compiler/how-it-works" class="inline-block mt-4 text-sm text-accent-500 hover:underline">
+        Learn more about the compiler &rarr;
+      </a>
+    </div>
+  </div>
+</section>

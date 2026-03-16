@@ -1,0 +1,172 @@
+---
+title: "The UTXO Model"
+description: "How UTXOs work and why they matter for smart contracts."
+section: "bitcoin-bsv-basics"
+order: 10
+lang: "en"
+---
+
+The Unspent Transaction Output (UTXO) model is the foundation of Bitcoin SV and the execution model for all Runar smart contracts. Understanding UTXOs is essential before writing contracts that live on-chain.
+
+## What Is a UTXO?
+
+A UTXO --- an **Unspent Transaction Output** --- is a discrete chunk of Bitcoin value that has not yet been consumed by a subsequent transaction. Think of UTXOs as individual coins in a cash register: each one has a specific value and a set of conditions that must be met to spend it.
+
+Every UTXO consists of two parts:
+
+1. **A satoshi amount** --- the value locked in this output (1 BSV = 100,000,000 satoshis).
+2. **A locking script** (also called `scriptPubKey`) --- the spending condition that must be satisfied to use this value.
+
+When a transaction is confirmed, its outputs become new UTXOs in the global UTXO set. When a later transaction references one of these outputs as an input and provides a valid unlocking script, the UTXO is "spent" and removed from the set.
+
+```
+Transaction A
+  Output 0: 5000 sats  |  locking script: "require signature from Alice"
+  Output 1: 3000 sats  |  locking script: "require signature from Bob"
+
+Both outputs become UTXOs. They remain unspent until a future
+transaction provides the correct unlocking script for each one.
+```
+
+A UTXO can only be spent **once** and must be spent **entirely** --- there is no partial spending. If Alice has a UTXO worth 5000 satoshis but only needs to send 2000, she creates a transaction with two outputs: 2000 to the recipient and the remainder (minus fees) back to herself as a **change output**.
+
+## UTXOs vs. Account-Based Models
+
+The most common point of confusion for developers coming from Ethereum or other EVM chains is the difference between the UTXO model and the account model. They are fundamentally different ways of tracking ownership and executing logic.
+
+### The Account Model (Ethereum)
+
+In Ethereum, the blockchain maintains a **global state tree**. Each account (whether an externally-owned account or a contract) has:
+
+- A balance (a single number that gets incremented or decremented)
+- A nonce (transaction counter)
+- Storage (a key-value map for contract state)
+- Code (for contract accounts)
+
+When you send ETH, the system subtracts from the sender's balance and adds to the receiver's balance. Smart contract state lives in persistent storage that any transaction can read from and write to.
+
+### The UTXO Model (BSV)
+
+In BSV, there are no accounts or balances. Instead:
+
+- Value exists as **discrete outputs** scattered across the transaction history.
+- Your "balance" is the sum of all UTXOs whose locking scripts you can satisfy.
+- There is **no global state** --- each UTXO is independent and self-contained.
+- Smart contract logic is embedded in the **locking script** of each UTXO.
+
+| Property | Account Model (Ethereum) | UTXO Model (BSV) |
+|---|---|---|
+| State | Global state tree, shared storage | Per-UTXO, independent |
+| Balance | Single number per account | Sum of all owned UTXOs |
+| Concurrency | Sequential per account (nonce ordering) | Parallel (independent UTXOs) |
+| Contract state | Persistent storage slots | Encoded in locking scripts |
+| Execution | Contract code reads/writes global state | Script validates spending conditions |
+| Determinism | Depends on global state at execution time | Depends only on the UTXO being spent |
+
+### Why This Distinction Matters
+
+The UTXO model has a structural advantage for scalability: because each UTXO is independent, transactions that spend different UTXOs can be validated **in parallel** by miners. There is no shared mutable state that forces sequential processing.
+
+In the account model, two transactions that modify the same contract storage must be ordered and executed sequentially, creating contention.
+
+## Spending Conditions and Locking Scripts
+
+Every UTXO carries a **locking script** that defines who can spend it and under what conditions. The most common locking script is **Pay-to-Public-Key-Hash (P2PKH)**, which requires a valid signature from the owner of a specific public key:
+
+```
+# P2PKH locking script (simplified)
+OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
+```
+
+To spend this UTXO, the spender provides an **unlocking script** containing their signature and public key:
+
+```
+# P2PKH unlocking script
+<signature> <publicKey>
+```
+
+During validation, the miner concatenates the unlocking script with the locking script and executes them on a stack machine. If execution completes with `true` on the stack, the spend is valid.
+
+But locking scripts are not limited to simple signature checks. On BSV, a locking script can contain **arbitrary Bitcoin Script logic** --- this is what makes smart contracts possible. A locking script might enforce:
+
+- Multi-signature requirements (2-of-3 parties must sign)
+- Hash preimage puzzles (reveal a secret whose hash matches a committed value)
+- Time-locks (UTXO cannot be spent until a certain block height)
+- Complex business logic compiled from Runar source code
+
+## Why UTXOs Matter for Smart Contracts
+
+When you write a smart contract in Runar, the compiler produces Bitcoin Script that becomes the **locking script** of a UTXO. This has several important consequences:
+
+### Each Contract Instance Is Independent
+
+Unlike Ethereum where a deployed contract has a single address and shared state, each UTXO on BSV is its own independent contract instance. If you deploy a counter contract, each counter is a separate UTXO with its own state. Two users interacting with their own counter UTXOs never interfere with each other.
+
+### No Global State Contention
+
+Because there is no shared state, multiple contract interactions can happen simultaneously without coordination. This is a direct benefit for throughput and scalability --- miners can validate contract executions in parallel across different UTXOs.
+
+### Contracts Are Consumed When Called
+
+Calling a method on a contract **spends the UTXO**. For stateless contracts, this is the end of the story --- the contract executes and the UTXO is gone. For stateful contracts, the spending transaction must create a **new UTXO** with the updated state, continuing the contract's lifecycle. This "spend-and-recreate" pattern is the foundation of stateful contracts on BSV.
+
+### Value Is Always Explicit
+
+Every contract UTXO holds a specific satoshi amount. When a contract transitions state, the value must be explicitly accounted for in the new outputs. There are no hidden balance changes --- everything is visible in the transaction structure.
+
+## UTXO Lifecycle in Practice
+
+Here is the complete lifecycle of a UTXO-based smart contract on BSV, from deployment to interaction:
+
+```
+DEPLOYMENT
+==========
+Transaction T1:
+  Input:  Alice's funding UTXO (10,000 sats)
+  Output 0: Contract UTXO (8,000 sats) with locking script = compiled Runar contract
+  Output 1: Change back to Alice (2,000 sats minus fee)
+
+  --> Output 0 becomes a new UTXO in the UTXO set.
+
+INTERACTION (Stateful)
+======================
+Transaction T2:
+  Input:  Contract UTXO from T1 Output 0 (provides unlocking script with method args)
+  Output 0: NEW Contract UTXO (8,000 sats) with updated state in locking script
+  Output 1: (optional) Other outputs
+
+  --> T1 Output 0 is removed from UTXO set (spent).
+  --> T2 Output 0 is added to UTXO set (new contract state).
+
+INTERACTION (Stateless)
+=======================
+Transaction T3:
+  Input:  Some stateless contract UTXO (provides unlocking script proving authorization)
+  Output 0: Payment to recipient
+  Output 1: Change output
+
+  --> The stateless contract UTXO is consumed and gone.
+```
+
+### The UTXO Set
+
+The **UTXO set** is the collection of all currently unspent outputs across the entire blockchain. It is the only data structure that miners need to validate new transactions. When a new transaction arrives:
+
+1. For each input, check that the referenced UTXO exists in the UTXO set.
+2. Execute the unlocking script against the locking script.
+3. If all inputs validate, remove spent UTXOs and add new outputs to the set.
+
+The UTXO set grows when transactions create more outputs than they consume, and shrinks when transactions consolidate multiple inputs into fewer outputs.
+
+### Implications for Runar Developers
+
+As a Runar developer, you do not need to manage UTXOs manually. The Runar SDK handles UTXO selection, transaction construction, and change output creation. However, understanding the UTXO model helps you:
+
+- **Design contracts correctly** --- knowing that each contract instance is an independent UTXO prevents assumptions about shared state.
+- **Reason about concurrency** --- multiple users can interact with different contract instances simultaneously.
+- **Understand fees** --- transaction fees come from the difference between total input value and total output value.
+- **Debug failures** --- if a contract call fails, it means the unlocking script did not satisfy the locking script for that specific UTXO.
+
+## Next Steps
+
+Now that you understand how UTXOs work, the next page covers [Bitcoin Script](/docs/en/bitcoin-bsv-basics/bitcoin-script) --- the low-level language that locking and unlocking scripts are written in, and the compilation target for all Runar contracts.

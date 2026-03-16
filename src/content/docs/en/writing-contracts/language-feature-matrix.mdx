@@ -1,0 +1,347 @@
+---
+title: "Language Feature Matrix"
+description: "Feature comparison across all supported languages."
+section: "writing-contracts"
+order: 70
+lang: "en"
+---
+
+Runar supports six source languages, each with different syntax and maturity levels. This page provides a comprehensive side-by-side comparison to help you choose the right language for your contract and understand the syntactic differences between them.
+
+## Language Status
+
+Not all language frontends are at the same level of maturity. Choose accordingly based on your needs:
+
+| Language | File Extension | Frontend Package | Status | Notes |
+| --- | --- | --- | --- | --- |
+| TypeScript | `.runar.ts` | `runar-lang` | **Stable** | Primary language. Most complete tooling and documentation. |
+| Go | `.runar.go` | `runar-go` | **Stable** | Full-featured, conformance-tested against TypeScript. |
+| Rust | `.runar.rs` | `runar-rs` | **Stable** | Full-featured, conformance-tested against TypeScript. |
+| Python | `.runar.py` | `runar-py` | **Stable** | Full-featured, conformance-tested against TypeScript. |
+| Solidity | `.runar.sol` | `runar-lang` | **Experimental** | Familiar syntax for Ethereum developers. Subset of Solidity. |
+| Move | `.runar.move` | `runar-lang` | **Experimental** | Resource-oriented syntax. Subset of Move. |
+
+**Stable** means the frontend is conformance-tested, produces identical Bitcoin Script output to TypeScript for the same contract, and is suitable for production use. **Experimental** means the frontend is functional but may have edge cases, and the API could change in minor releases.
+
+## Contract Declaration
+
+How each language defines a contract:
+
+| Feature | TypeScript | Go | Rust | Python | Solidity | Move |
+| --- | --- | --- | --- | --- | --- | --- |
+| Stateless | `class C extends SmartContract` | `type C struct { runar.SmartContract }` | `#[runar::contract] struct C` | `class C(SmartContract)` | `contract C is SmartContract` | `module c { struct C has key }` |
+| Stateful | `class C extends StatefulSmartContract` | `type C struct { runar.StatefulSmartContract }` | `#[runar::contract(stateful)] struct C` | `class C(StatefulSmartContract)` | `contract C is StatefulSmartContract` | `struct C has key` + `&mut self` methods |
+
+## Readonly Fields
+
+How each language marks a field as immutable (baked into the locking script):
+
+| Language | Syntax | Example |
+| --- | --- | --- |
+| TypeScript | `readonly` keyword | `readonly owner: PubKey;` |
+| Go | `runar:"readonly"` struct tag | `Owner runar.PubKey \`runar:"readonly"\`` |
+| Rust | `#[readonly]` attribute | `#[readonly] owner: PubKey,` |
+| Python | `Readonly[T]` type wrapper | `owner: Readonly[PubKey]` |
+| Solidity | `immutable` keyword | `PubKey immutable owner;` |
+| Move | Inferred from usage | Fields never modified in `&mut self` methods |
+
+## Mutable State Fields
+
+How each language declares mutable state (only valid in stateful contracts):
+
+| Language | Syntax | Example |
+| --- | --- | --- |
+| TypeScript | Plain field (no `readonly`) | `count: bigint;` |
+| Go | Field without struct tag | `Count int64` |
+| Rust | Field without `#[readonly]` | `count: i64,` |
+| Python | Plain type annotation | `count: int = 0` |
+| Solidity | Plain variable | `int64 count;` |
+| Move | Plain struct field | `count: u64,` |
+
+## Public Methods (Entry Points)
+
+How each language defines a spending condition:
+
+| Language | Syntax | Example |
+| --- | --- | --- |
+| TypeScript | `public` keyword | `public unlock(sig: Sig) { ... }` |
+| Go | Exported method (capitalized) | `func (c *C) Unlock(sig runar.Sig) { ... }` |
+| Rust | `#[public]` attribute | `#[public] fn unlock(&self, sig: Sig) { ... }` |
+| Python | `@public` decorator | `@public def unlock(self, sig: Sig): ...` |
+| Solidity | `public` visibility | `function unlock(Sig sig) public { ... }` |
+| Move | `public fun` keyword | `public fun unlock(self: &C, sig: Sig) { ... }` |
+
+## Private Methods (Helpers)
+
+How each language defines a private method that gets inlined:
+
+| Language | Syntax | Example |
+| --- | --- | --- |
+| TypeScript | `private` keyword | `private verify(pk: PubKey): boolean { ... }` |
+| Go | Unexported method (lowercase) | `func (c *C) verify(pk runar.PubKey) bool { ... }` |
+| Rust | Method without `#[public]` | `fn verify(&self, pk: PubKey) -> bool { ... }` |
+| Python | Method without `@public` | `def _verify(self, pk: PubKey) -> bool: ...` |
+| Solidity | `private` visibility | `function verify(PubKey pk) private returns (bool) { ... }` |
+| Move | `fun` without `public` | `fun verify(self: &C, pk: PubKey): bool { ... }` |
+
+## Assertions
+
+How each language asserts conditions:
+
+| Language | Function | Example |
+| --- | --- | --- |
+| TypeScript | `assert()` | `assert(checkSig(sig, pk));` |
+| Go | `runar.Assert()` | `runar.Assert(runar.CheckSig(sig, pk))` |
+| Rust | `assert!()` macro | `assert!(check_sig(&sig, &pk));` |
+| Python | `assert_()` | `assert_(check_sig(sig, pk))` |
+| Solidity | `require()` or `assert()` | `require(checkSig(sig, pk));` |
+| Move | `assert!()` macro | `assert!(check_sig(&sig, &pk));` |
+
+## Constructors
+
+How each language initializes contract state:
+
+| Language | Syntax |
+| --- | --- |
+| TypeScript | `constructor(args) { super(args); this.field = arg; }` |
+| Go | Struct literal at deploy time (no explicit constructor in contract) |
+| Rust | Struct literal at deploy time (no explicit constructor in contract) |
+| Python | `def __init__(self, args): super().__init__(args); self.field = arg` |
+| Solidity | `constructor(args) { field = arg; }` |
+| Move | Module-level init function or struct literal at deploy time |
+
+## Imports
+
+How each language imports Runar types and functions:
+
+| Language | Import Statement |
+| --- | --- |
+| TypeScript | `import { SmartContract, assert, PubKey, Sig } from 'runar-lang';` |
+| Go | `import "runar"` |
+| Rust | `use runar::prelude::*;` |
+| Python | `from runar import SmartContract, assert_, PubKey, Sig` |
+| Solidity | Implicit (all types and functions are globally available) |
+| Move | `use runar::*;` |
+
+## Numeric Types
+
+How each language represents integers:
+
+| Language | Type | Literal Syntax | Example |
+| --- | --- | --- | --- |
+| TypeScript | `bigint` | `42n` | `const x: bigint = 42n;` |
+| Go | `int64` | `42` | `x := int64(42)` |
+| Rust | `i64` | `42` | `let x: i64 = 42;` |
+| Python | `int` | `42` | `x: int = 42` |
+| Solidity | `int64` | `42` | `int64 x = 42;` |
+| Move | `u64` | `42` | `let x: u64 = 42;` |
+
+Note that Move uses unsigned `u64` while Go, Rust, and Solidity use signed `int64`/`i64`. TypeScript's `bigint` and Python's `int` are arbitrary-precision. All compile to the same Bitcoin Script numeric representation.
+
+## Fixed Arrays
+
+How each language declares fixed-size arrays:
+
+| Language | Syntax | Example |
+| --- | --- | --- |
+| TypeScript | `FixedArray<T, N>` | `signers: FixedArray<PubKey, 3>` |
+| Go | `[N]T` | `Signers [3]runar.PubKey` |
+| Rust | `[T; N]` | `signers: [PubKey; 3]` |
+| Python | `FixedArray[T, N]` | `signers: FixedArray[PubKey, 3]` |
+| Solidity | `T[N]` | `PubKey[3] signers;` |
+| Move | `vector<T>` (fixed) | `signers: vector<PubKey>` |
+
+## For Loops
+
+How each language writes a compile-time-bounded loop:
+
+| Language | Syntax |
+| --- | --- |
+| TypeScript | `for (let i = 0n; i < 10n; i++) { ... }` |
+| Go | `for i := int64(0); i < 10; i++ { ... }` |
+| Rust | `for i in 0..10 { ... }` |
+| Python | `for i in range(10): ...` |
+| Solidity | `for (int64 i = 0; i < 10; i++) { ... }` |
+| Move | `while (i < 10) { ...; i = i + 1; }` |
+
+All loops are unrolled at compile time. The bound (10 in these examples) must be a compile-time constant in every language.
+
+## Conditionals
+
+How each language writes conditional logic:
+
+| Language | If/Else | Ternary / Expression |
+| --- | --- | --- |
+| TypeScript | `if (cond) { ... } else { ... }` | `cond ? a : b` |
+| Go | `if cond { ... } else { ... }` | None (use if/else) |
+| Rust | `if cond { ... } else { ... }` | `if cond { a } else { b }` (expression) |
+| Python | `if cond: ... else: ...` | `a if cond else b` |
+| Solidity | `if (cond) { ... } else { ... }` | `cond ? a : b` |
+| Move | `if (cond) { ... } else { ... }` | `if (cond) { a } else { b }` (expression) |
+
+## Signature Verification
+
+How each language verifies a signature:
+
+| Language | Single Sig | Multi-Sig |
+| --- | --- | --- |
+| TypeScript | `checkSig(sig, pk)` | `checkMultiSig(sigs, pks)` |
+| Go | `runar.CheckSig(sig, pk)` | `runar.CheckMultiSig(sigs, pks)` |
+| Rust | `check_sig(&sig, &pk)` | `check_multi_sig(&sigs, &pks)` |
+| Python | `check_sig(sig, pk)` | `check_multi_sig(sigs, pks)` |
+| Solidity | `checkSig(sig, pk)` | `checkMultiSig(sigs, pks)` |
+| Move | `check_sig(&sig, &pk)` | `check_multi_sig(&sigs, &pks)` |
+
+## Hashing
+
+How each language calls hash functions:
+
+| Language | SHA-256 | Hash-160 | Double SHA-256 |
+| --- | --- | --- | --- |
+| TypeScript | `sha256(data)` | `hash160(data)` | `hash256(data)` |
+| Go | `runar.Sha256(data)` | `runar.Hash160(data)` | `runar.Hash256(data)` |
+| Rust | `sha256(&data)` | `hash160(&data)` | `hash256(&data)` |
+| Python | `sha256(data)` | `hash160(data)` | `hash256(data)` |
+| Solidity | `sha256(data)` | `hash160(data)` | `hash256(data)` |
+| Move | `sha256(&data)` | `hash160(&data)` | `hash256(&data)` |
+
+## Complete Minimal Example in Each Language
+
+For reference, here is the same simple P2PKH contract written in all six languages.
+
+### TypeScript
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, Ripemd160, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Ripemd160;
+  constructor(pubKeyHash: Ripemd160) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+```
+
+### Go
+
+```go
+package p2pkh
+import "runar"
+type P2PKH struct {
+    runar.SmartContract
+    PubKeyHash runar.Ripemd160 `runar:"readonly"`
+}
+func (p *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
+    runar.Assert(runar.Hash160(pubKey) == p.PubKeyHash)
+    runar.Assert(runar.CheckSig(sig, pubKey))
+}
+```
+
+### Rust
+
+```rust
+use runar::prelude::*;
+#[runar::contract]
+struct P2PKH {
+    #[readonly] pub_key_hash: Ripemd160,
+}
+#[runar::methods]
+impl P2PKH {
+    #[public]
+    fn unlock(&self, sig: Sig, pub_key: PubKey) {
+        assert!(hash160(&pub_key) == self.pub_key_hash);
+        assert!(check_sig(&sig, &pub_key));
+    }
+}
+```
+
+### Python
+
+```python
+from runar import SmartContract, PubKey, Sig, Ripemd160, Readonly, public, assert_, hash160, check_sig
+class P2PKH(SmartContract):
+    pub_key_hash: Readonly[Ripemd160]
+    def __init__(self, pub_key_hash: Ripemd160):
+        super().__init__(pub_key_hash)
+        self.pub_key_hash = pub_key_hash
+    @public
+    def unlock(self, sig: Sig, pub_key: PubKey):
+        assert_(hash160(pub_key) == self.pub_key_hash)
+        assert_(check_sig(sig, pub_key))
+```
+
+### Solidity
+
+```solidity
+pragma runar ^0.1.0;
+contract P2PKH is SmartContract {
+    Ripemd160 immutable pubKeyHash;
+    constructor(Ripemd160 _pubKeyHash) {
+        pubKeyHash = _pubKeyHash;
+    }
+    function unlock(Sig sig, PubKey pubKey) public {
+        require(hash160(pubKey) == pubKeyHash);
+        require(checkSig(sig, pubKey));
+    }
+}
+```
+
+### Move
+
+```move
+module p2pkh {
+    use runar::*;
+    struct P2PKH has key {
+        pub_key_hash: Ripemd160,
+    }
+    public fun unlock(self: &P2PKH, sig: Sig, pub_key: PubKey) {
+        assert!(hash160(&pub_key) == self.pub_key_hash);
+        assert!(check_sig(&sig, &pub_key));
+    }
+}
+```
+
+## Choosing a Language
+
+**Choose TypeScript if:**
+- You want the most mature tooling, documentation, and community support
+- You are new to Runar and want the smoothest learning path
+- Your team primarily works in JavaScript/TypeScript
+
+**Choose Go if:**
+- You prefer Go's simplicity and explicit error handling style
+- Your backend services are written in Go
+- You want a statically compiled frontend with fast compilation
+
+**Choose Rust if:**
+- You want Rust's ownership model to catch errors at compile time
+- You are already comfortable with Rust's syntax and borrow checker
+- You value the alignment between Rust's ownership and UTXO resource semantics
+
+**Choose Python if:**
+- You want the most concise syntax with minimal boilerplate
+- Your team primarily works in Python
+- You are prototyping contracts quickly
+
+**Choose Solidity if:**
+- You are coming from Ethereum and want a familiar syntax
+- You are porting existing Solidity contracts to BSV
+- You understand the EVM-to-UTXO conceptual differences
+
+**Choose Move if:**
+- You are coming from Sui or Aptos and want a familiar syntax
+- You value Move's resource-oriented safety guarantees
+- You want the closest conceptual alignment between language and UTXO model
+
+Regardless of which language you choose, the compiled Bitcoin Script output is identical. A P2PKH contract compiled from TypeScript produces the exact same script as the same contract compiled from Go, Rust, Python, Solidity, or Move.
+
+## Next Steps
+
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Core concepts that apply to all languages
+- [TypeScript Contracts](/docs/en/writing-contracts/typescript-contracts) -- Start with the primary language
+- [Compiler Configuration](/docs/en/compiler/configuration) -- Customize compilation for your language

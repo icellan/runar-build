@@ -1,0 +1,423 @@
+---
+title: "Go Contracts"
+description: "Writing contracts in Go."
+section: "writing-contracts"
+order: 30
+lang: "en"
+---
+
+Runar supports writing smart contracts in Go, bringing Go's simplicity and strong typing to BSV contract development. Go contracts use struct-based definitions and tagged fields to express on-chain logic. The Go frontend compiles through the same intermediate representation as all other Runar languages, producing identical Bitcoin Script output.
+
+## Prerequisites
+
+- **Go 1.26+** installed on your system
+- The `runar-go` package available (installed automatically when you use the Runar CLI with Go contracts)
+
+## File Extension and Package Structure
+
+Go contract files use the `.runar.go` extension. Each contract lives in its own Go package directory, following standard Go conventions:
+
+```
+contracts/
+  tictactoe/
+    tictactoe.runar.go
+  counter/
+    counter.runar.go
+  escrow/
+    escrow.runar.go
+```
+
+Every contract file begins with a `package` declaration and imports from the `runar` package:
+
+```go
+package counter
+
+import "runar"
+```
+
+The `runar` package provides the base contract types (`runar.SmartContract`, `runar.StatefulSmartContract`), all on-chain types (`runar.PubKey`, `runar.Sig`, etc.), and all built-in functions (`runar.Assert`, `runar.CheckSig`, etc.).
+
+## Stateless Contracts
+
+A stateless contract is a Go struct that embeds `runar.SmartContract`. Readonly fields are marked with the `runar:"readonly"` struct tag. Public methods (capitalized names) serve as spending entry points.
+
+### P2PKH in Go
+
+```go
+package p2pkh
+
+import "runar"
+
+type P2PKH struct {
+	runar.SmartContract
+	PubKeyHash runar.Ripemd160 `runar:"readonly"`
+}
+
+func (p *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
+	runar.Assert(runar.Hash160(pubKey) == p.PubKeyHash)
+	runar.Assert(runar.CheckSig(sig, pubKey))
+}
+```
+
+Key points:
+
+- **Struct embedding** replaces class inheritance. `runar.SmartContract` is embedded directly into the struct.
+- **Struct tags** control on-chain behavior. The `runar:"readonly"` tag marks a field as immutable and baked into the locking script.
+- **Exported methods** (capitalized first letter) are public entry points. Unexported methods (lowercase first letter) are private helpers that get inlined.
+- **`runar.Assert()`** is the assertion function. Every public method must call it at least once.
+
+### Escrow in Go
+
+```go
+package escrow
+
+import "runar"
+
+type Escrow struct {
+	runar.SmartContract
+	Buyer  runar.PubKey `runar:"readonly"`
+	Seller runar.PubKey `runar:"readonly"`
+	Arbiter runar.PubKey `runar:"readonly"`
+}
+
+func (e *Escrow) Release(sellerSig runar.Sig, buyerSig runar.Sig) {
+	runar.Assert(runar.CheckSig(sellerSig, e.Seller))
+	runar.Assert(runar.CheckSig(buyerSig, e.Buyer))
+}
+
+func (e *Escrow) Refund(buyerSig runar.Sig, arbiterSig runar.Sig) {
+	runar.Assert(runar.CheckSig(buyerSig, e.Buyer))
+	runar.Assert(runar.CheckSig(arbiterSig, e.Arbiter))
+}
+
+func (e *Escrow) Arbitrate(sellerSig runar.Sig, arbiterSig runar.Sig) {
+	runar.Assert(runar.CheckSig(sellerSig, e.Seller))
+	runar.Assert(runar.CheckSig(arbiterSig, e.Arbiter))
+}
+```
+
+## Stateful Contracts
+
+A stateful contract embeds `runar.StatefulSmartContract`. Mutable state fields do not have the `runar:"readonly"` tag. The compiler automatically injects preimage verification at method entry and state continuation at method exit.
+
+### Counter in Go
+
+```go
+package counter
+
+import "runar"
+
+type Counter struct {
+	runar.StatefulSmartContract
+	Count int64
+}
+
+func (c *Counter) Increment() {
+	c.Count = c.Count + 1
+	runar.Assert(true)
+}
+
+func (c *Counter) Decrement() {
+	runar.Assert(c.Count > 0)
+	c.Count = c.Count - 1
+	runar.Assert(true)
+}
+```
+
+When `Increment()` is called, the spending transaction must create a new output containing a `Counter` with the updated `Count`. The compiler enforces this automatically through the OP_PUSH_TX pattern.
+
+### TicTacToe: A Full Stateful Example
+
+This example demonstrates a more complex stateful contract with both readonly and mutable fields, multiple public methods, and private helper logic.
+
+```go
+package tictactoe
+
+import "runar"
+
+type TicTacToe struct {
+	runar.StatefulSmartContract
+	Alice runar.PubKey `runar:"readonly"`
+	Bob   runar.PubKey `runar:"readonly"`
+	C0    int64
+	C1    int64
+	C2    int64
+	C3    int64
+	C4    int64
+	C5    int64
+	C6    int64
+	C7    int64
+	C8    int64
+	IsAliceTurn bool
+}
+
+func (t *TicTacToe) Move(sig runar.Sig, pos int64, player int64) {
+	// Verify it is the correct player's turn
+	if t.IsAliceTurn {
+		runar.Assert(player == 1)
+		runar.Assert(runar.CheckSig(sig, t.Alice))
+	} else {
+		runar.Assert(player == 2)
+		runar.Assert(runar.CheckSig(sig, t.Bob))
+	}
+
+	// Verify the chosen cell is empty and place the mark
+	runar.Assert(t.getCell(pos) == 0)
+	t.setCell(pos, player)
+
+	// Toggle turn
+	t.IsAliceTurn = !t.IsAliceTurn
+
+	runar.Assert(true)
+}
+
+func (t *TicTacToe) getCell(pos int64) int64 {
+	if pos == 0 { return t.C0 }
+	if pos == 1 { return t.C1 }
+	if pos == 2 { return t.C2 }
+	if pos == 3 { return t.C3 }
+	if pos == 4 { return t.C4 }
+	if pos == 5 { return t.C5 }
+	if pos == 6 { return t.C6 }
+	if pos == 7 { return t.C7 }
+	if pos == 8 { return t.C8 }
+	return 0
+}
+
+func (t *TicTacToe) setCell(pos int64, value int64) {
+	if pos == 0 { t.C0 = value }
+	if pos == 1 { t.C1 = value }
+	if pos == 2 { t.C2 = value }
+	if pos == 3 { t.C3 = value }
+	if pos == 4 { t.C4 = value }
+	if pos == 5 { t.C5 = value }
+	if pos == 6 { t.C6 = value }
+	if pos == 7 { t.C7 = value }
+	if pos == 8 { t.C8 = value }
+}
+```
+
+Note that `getCell` and `setCell` are unexported (lowercase first letter), making them private helper methods that are inlined at each call site.
+
+## Types in Go Contracts
+
+The `runar` package provides all on-chain types. Go's `int64` maps to `bigint` in the compiled output.
+
+| Go Type | Equivalent TypeScript Type | Description |
+| --- | --- | --- |
+| `int64` | `bigint` | Integer values. The only numeric type allowed. |
+| `bool` | `boolean` | Boolean values. |
+| `runar.ByteString` | `ByteString` | Variable-length byte sequence. |
+| `runar.PubKey` | `PubKey` | 33-byte compressed public key. |
+| `runar.Sig` | `Sig` | DER-encoded signature (affine type). |
+| `runar.Sha256` | `Sha256` | 32-byte SHA-256 digest. |
+| `runar.Ripemd160` | `Ripemd160` | 20-byte RIPEMD-160 digest. |
+| `runar.Addr` | `Addr` | 20-byte address. |
+| `runar.SigHashPreimage` | `SigHashPreimage` | Transaction preimage (affine type). |
+| `runar.Point` | `Point` | 64-byte elliptic curve point. |
+| `runar.RabinSig` | `RabinSig` | Rabin signature. |
+| `runar.RabinPubKey` | `RabinPubKey` | Rabin public key. |
+| `[N]T` | `FixedArray<T, N>` | Fixed-size array. `N` must be a compile-time constant. |
+
+### Fixed Arrays in Go
+
+Go's native fixed-size array syntax maps directly to Runar's `FixedArray`:
+
+```go
+type MultiSig struct {
+	runar.SmartContract
+	Signers [3]runar.PubKey `runar:"readonly"`
+}
+
+func (m *MultiSig) Unlock(sigs [2]runar.Sig) {
+	runar.Assert(runar.CheckMultiSig(sigs[:], m.Signers[:]))
+}
+```
+
+Dynamic slices (`[]T`) are not supported. All array sizes must be constants.
+
+## Built-in Functions in Go
+
+All built-in functions are accessed through the `runar` package. Function names follow Go's capitalization conventions (exported names).
+
+### Cryptographic Functions
+
+```go
+runar.CheckSig(sig, pubKey)
+runar.CheckMultiSig(sigs, pubKeys)
+runar.Hash256(data)
+runar.Hash160(data)
+runar.Sha256(data)
+runar.Ripemd160(data)
+runar.CheckPreimage(preimage)
+```
+
+### Byte Operations
+
+```go
+runar.Len(data)
+runar.Cat(a, b)
+runar.Substr(data, start, length)
+runar.Left(data, length)
+runar.Right(data, length)
+runar.Split(data, position)       // returns two values
+runar.ReverseBytes(data)
+runar.ToByteString(value)
+```
+
+### Conversion Functions
+
+```go
+runar.Num2Bin(num, length)
+runar.Bin2Num(data)
+runar.Int2Str(num, byteLen)
+```
+
+### Math Functions
+
+```go
+runar.Abs(x)
+runar.Min(a, b)
+runar.Max(a, b)
+runar.Within(x, low, high)
+runar.SafeDiv(a, b)
+runar.SafeMod(a, b)
+runar.Clamp(x, low, high)
+runar.Pow(base, exp)
+runar.Sqrt(x)
+```
+
+### Control Functions
+
+```go
+runar.Assert(condition)
+```
+
+## Struct Tags Reference
+
+Struct tags control how fields are treated by the Runar compiler:
+
+| Tag | Meaning |
+| --- | --- |
+| `runar:"readonly"` | Field is immutable, baked into the locking script at deployment. |
+| (no tag) | Field is mutable state. Only valid in `StatefulSmartContract` structs. |
+
+In a struct that embeds `runar.SmartContract`, all fields that are not the embedded struct must have the `runar:"readonly"` tag. Omitting the tag on a field in a stateless contract is a compile-time error.
+
+## Control Flow in Go Contracts
+
+### For Loops
+
+Only `for` loops with compile-time constant bounds are allowed. The compiler unrolls them:
+
+```go
+sum := int64(0)
+for i := int64(0); i < 10; i++ {
+	sum = sum + balances[i]
+}
+```
+
+Go's `range` keyword is supported over fixed-size arrays:
+
+```go
+for i, val := range balances {
+	sum = sum + val
+}
+```
+
+The `range` is unrolled at compile time based on the array's fixed size.
+
+### Conditionals
+
+Standard `if`/`else` and `switch` statements work:
+
+```go
+if amount > threshold {
+	t.Balance = t.Balance - amount
+} else {
+	runar.Assert(false)
+}
+
+switch pos {
+case 0:
+	t.C0 = value
+case 1:
+	t.C1 = value
+default:
+	runar.Assert(false)
+}
+```
+
+### Disallowed Go Features
+
+The following Go features are not available in contracts:
+
+- `go` keyword (goroutines)
+- Channels
+- `defer`, `panic`, `recover`
+- Interfaces
+- Maps
+- Slices (use fixed arrays)
+- Pointers (except the method receiver)
+- Standard library imports (only `runar` is allowed)
+- Multiple return values (except from `runar.Split`)
+- `for` loops without constant bounds
+- Recursion
+- Type assertions
+- Type switches (on interfaces)
+- Anonymous functions / closures
+
+## Compiling Go Contracts
+
+```bash
+runar compile contracts/tictactoe/tictactoe.runar.go --output ./artifacts
+```
+
+The compiler invokes the `runar-go` frontend to parse the Go source, translates it to the shared IR, and produces the same JSON artifact format as TypeScript contracts.
+
+To compile all Go contracts in a directory:
+
+```bash
+runar compile contracts/**/*.runar.go --output ./artifacts
+```
+
+## Testing Go Contracts
+
+Go contracts are tested using native Go tests. You instantiate the contract struct directly and call its methods, then use standard Go assertions to verify the results. A separate `runar.CompileCheck` function validates that the contract source compiles correctly.
+
+```go
+package counter_test
+
+import (
+	"testing"
+	"runar"
+)
+
+func TestCounter_Increment(t *testing.T) {
+	c := &Counter{Count: 0}
+	c.Increment()
+	if c.Count != 1 {
+		t.Errorf("expected 1, got %d", c.Count)
+	}
+}
+
+func TestCounter_Compile(t *testing.T) {
+	if err := runar.CompileCheck("Counter.runar.go"); err != nil {
+		t.Fatalf("compile check failed: %v", err)
+	}
+}
+```
+
+You can also run tests via the Runar CLI:
+
+```bash
+runar test
+```
+
+See [Writing Tests](/docs/en/testing-and-debugging/writing-tests) for a comprehensive testing guide.
+
+## Next Steps
+
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Rust Contracts](/docs/en/writing-contracts/rust-contracts) -- Write contracts in Rust
+- [Language Feature Matrix](/docs/en/writing-contracts/language-feature-matrix) -- Compare all six languages

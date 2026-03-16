@@ -1,0 +1,104 @@
+---
+title: "Overview"
+description: "An introduction to Rúnar, the smart contract compiler and SDK for Bitcoin SV."
+section: "getting-started"
+order: 10
+lang: "en"
+---
+
+Rúnar is a smart contract compiler and SDK for Bitcoin SV. It lets you write contracts in familiar programming languages -- TypeScript, Go, Rust, Python, Solidity, or Move -- and compiles them down to Bitcoin Script for deployment on the BSV network.
+
+Rather than inventing a new domain-specific language, Rúnar meets you where you are. You write contracts in a language you already know, using standard tooling and editors, and the Rúnar compiler handles the translation to Bitcoin Script.
+
+## The UTXO Model vs. Account Model
+
+If you are coming from Ethereum or other account-model blockchains, the biggest conceptual shift is how state works.
+
+In the **account model** (Ethereum), a contract lives at a persistent address with mutable storage. Calling a method mutates that storage in place. Every contract has a single, long-lived state that transactions modify.
+
+In the **UTXO model** (Bitcoin SV), there is no persistent contract address. Instead, contracts exist as **locking scripts** on unspent transaction outputs (UTXOs). To "call" a contract, you create a transaction that spends the UTXO by providing an **unlocking script** that satisfies the locking script's conditions. If the contract needs to maintain state, the spending transaction creates a new UTXO with an updated locking script -- this is known as the **OP_PUSH_TX pattern**.
+
+This model has important implications:
+
+- **Contracts are single-use by default.** Once a UTXO is spent, that contract instance is consumed.
+- **Parallelism is natural.** Different UTXOs can be spent concurrently without contention.
+- **State transitions are explicit.** Stateful contracts must encode their next state into a new output.
+- **No global state.** Contracts cannot read each other's storage; they can only enforce spending conditions.
+
+Rúnar abstracts much of this complexity so you can focus on business logic rather than raw Bitcoin Script opcodes.
+
+## Supported Languages
+
+Rúnar supports six language frontends. Each compiles through the same intermediate representation (IR) to produce identical Bitcoin Script output:
+
+| Language   | File Extension | Runtime Package |
+| ---------- | -------------- | ---------------- |
+| TypeScript | `.runar.ts`    | `runar-lang`     |
+| Go         | `.runar.go`    | `runar-go`       |
+| Rust       | `.runar.rs`    | `runar-rs`       |
+| Python     | `.runar.py`    | `runar-py`       |
+| Solidity   | `.runar.sol`   | *(built into compiler)* |
+| Move       | `.runar.move`  | *(built into compiler)* |
+
+TypeScript is the primary and most mature frontend. Go, Rust, and Python each have dedicated compiler implementations. The Solidity and Move frontends provide familiar syntax for developers coming from those ecosystems.
+
+## Key Properties
+
+Rúnar's compiler provides several guarantees that are critical for on-chain code:
+
+- **Deterministic compilation.** The same source code always produces the exact same Bitcoin Script output, byte-for-byte. This is essential for contract verification and reproducible builds.
+- **Type safety.** All contract parameters, method arguments, and return values are statically typed. Type errors are caught at compile time, not at deployment.
+- **Termination guaranteed.** Bitcoin Script is not Turing-complete by design. Every Rúnar contract is guaranteed to terminate -- there are no infinite loops or unbounded recursion.
+- **Conformance-verified.** The four compiler implementations (TypeScript, Go, Rust, Python) are tested against a shared conformance suite. A contract compiled with `runar-go` produces the same script as the same contract compiled with `runar-rs`.
+
+## Contract Models
+
+Rúnar provides two base classes for contracts, each suited to different use cases.
+
+### SmartContract (Stateless)
+
+The `SmartContract` base class is for contracts that do not maintain state between transactions. All properties are `readonly` and are baked into the locking script at deployment time. This is the simplest and most common model.
+
+```typescript
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+```
+
+Use `SmartContract` for: payment conditions, hash locks, time locks, multi-signature schemes, and any contract where the spending conditions are fixed at creation.
+
+### StatefulSmartContract (Mutable State)
+
+The `StatefulSmartContract` base class is for contracts that carry state forward across transactions using the OP_PUSH_TX pattern. When a stateful contract is spent, it enforces that the spending transaction creates a new output containing the updated state.
+
+Use `StatefulSmartContract` for: counters, token balances, voting tallies, auctions, and any contract that needs to evolve over time.
+
+## Monorepo Architecture
+
+Rúnar is structured as a monorepo using **pnpm workspaces** and **Turbo** for build orchestration. The key packages are:
+
+| Package             | Purpose                                         |
+| ------------------- | ----------------------------------------------- |
+| `runar-lang`        | Base classes, types, and built-in function definitions |
+| `runar-compiler`    | TypeScript compiler: parser, pipeline, and IR-to-script codegen |
+| `runar-cli`         | Command-line interface (`runar` command)           |
+| `runar-sdk`         | Deployment, interaction, and transaction building  |
+| `runar-testing`     | Test utilities and local contract execution        |
+| `runar-ir-schema`   | Intermediate representation schema definition      |
+| `runar-go`          | Go types, mock crypto, and deployment SDK          |
+| `runar-rs`          | Rust types, mock crypto, and deployment SDK        |
+| `runar-lang-macros` | Rust procedural macros for contract annotations    |
+| `runar`             | Python language frontend (PyPI package)             |
+
+When you install Rúnar as an end user, you typically interact with `runar-cli` (the `runar` command) and `runar-lang` (for TypeScript contracts). The other packages are pulled in as dependencies automatically.
+
+## Next Steps
+
+- [Installation](/docs/en/getting-started/installation) -- Set up Rúnar on your machine
+- [Quick Start](/docs/en/getting-started/quick-start) -- Write, compile, test, and deploy your first contract
+- [Project Structure](/docs/en/getting-started/project-structure) -- Understand how a Rúnar project is organized

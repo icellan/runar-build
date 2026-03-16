@@ -1,0 +1,467 @@
+---
+title: "Solidity Contracts"
+description: "Writing contracts in Solidity."
+section: "writing-contracts"
+order: 50
+lang: "en"
+---
+
+Runar can compile a subset of Solidity to Bitcoin Script, allowing developers with Ethereum experience to target BSV without learning a new language. The Solidity frontend maps familiar Solidity syntax to the UTXO model, but there are important differences from EVM execution that you need to understand.
+
+## Prerequisites
+
+- **Node.js >= 20** and **pnpm 9.15+** (the Solidity frontend is part of the `runar-lang` package)
+- No separate Solidity compiler is needed -- Runar's compiler handles `.runar.sol` files directly
+
+## File Extension and Structure
+
+Solidity contract files use the `.runar.sol` extension. Each file begins with a `pragma runar` directive and contains exactly one contract:
+
+```
+contracts/
+  P2PKH.runar.sol
+  Counter.runar.sol
+  Escrow.runar.sol
+  TicTacToe.runar.sol
+```
+
+The pragma directive specifies the Runar compiler version:
+
+```solidity
+pragma runar ^0.1.0;
+```
+
+This is analogous to Solidity's `pragma solidity` directive but targets the Runar compiler rather than the EVM compiler.
+
+## Stateless Contracts
+
+A stateless contract uses `contract ... is SmartContract`. Readonly fields are declared with the `immutable` keyword (borrowed from Solidity's existing semantics where `immutable` means set once at construction and never changed).
+
+### P2PKH in Solidity
+
+```solidity
+pragma runar ^0.1.0;
+
+contract P2PKH is SmartContract {
+    Ripemd160 immutable pubKeyHash;
+
+    constructor(Ripemd160 _pubKeyHash) {
+        pubKeyHash = _pubKeyHash;
+    }
+
+    function unlock(Sig sig, PubKey pubKey) public {
+        require(hash160(pubKey) == pubKeyHash);
+        require(checkSig(sig, pubKey));
+    }
+}
+```
+
+Key points:
+
+- **`is SmartContract`** marks this as a stateless contract. All non-immutable state variables are disallowed.
+- **`immutable`** keyword marks fields as readonly, baked into the locking script at deployment time.
+- **`function ... public`** makes a method a spending entry point. The `public` visibility keyword is required for entry points.
+- **`require()`** is the assertion function. It maps to Bitcoin Script's `OP_VERIFY` pattern. Every public function must include at least one `require()` call.
+- **`constructor`** initializes immutable fields. Unlike Solidity on the EVM, there is no deployment bytecode -- the constructor parameters are embedded directly into the locking script.
+
+### Escrow in Solidity
+
+```solidity
+pragma runar ^0.1.0;
+
+contract Escrow is SmartContract {
+    PubKey immutable buyer;
+    PubKey immutable seller;
+    PubKey immutable arbiter;
+
+    constructor(PubKey _buyer, PubKey _seller, PubKey _arbiter) {
+        buyer = _buyer;
+        seller = _seller;
+        arbiter = _arbiter;
+    }
+
+    function release(Sig sellerSig, Sig buyerSig) public {
+        require(checkSig(sellerSig, seller));
+        require(checkSig(buyerSig, buyer));
+    }
+
+    function refund(Sig buyerSig, Sig arbiterSig) public {
+        require(checkSig(buyerSig, buyer));
+        require(checkSig(arbiterSig, arbiter));
+    }
+
+    function arbitrate(Sig sellerSig, Sig arbiterSig) public {
+        require(checkSig(sellerSig, seller));
+        require(checkSig(arbiterSig, arbiter));
+    }
+}
+```
+
+## Stateful Contracts
+
+A stateful contract uses `contract ... is StatefulSmartContract`. Mutable state variables are declared without the `immutable` keyword. The compiler automatically injects preimage verification and state continuation logic.
+
+### Counter in Solidity
+
+```solidity
+pragma runar ^0.1.0;
+
+contract Counter is StatefulSmartContract {
+    int64 count;
+
+    constructor() {
+        count = 0;
+    }
+
+    function increment() public {
+        count = count + 1;
+        require(true);
+    }
+
+    function decrement() public {
+        require(count > 0);
+        count = count - 1;
+        require(true);
+    }
+}
+```
+
+### TicTacToe in Solidity
+
+A more complete example with both immutable and mutable fields, private helper functions, and conditional logic:
+
+```solidity
+pragma runar ^0.1.0;
+
+contract TicTacToe is StatefulSmartContract {
+    PubKey immutable alice;
+    PubKey immutable bob;
+
+    int64 c0;
+    int64 c1;
+    int64 c2;
+    int64 c3;
+    int64 c4;
+    int64 c5;
+    int64 c6;
+    int64 c7;
+    int64 c8;
+    bool isAliceTurn;
+
+    constructor(PubKey _alice, PubKey _bob) {
+        alice = _alice;
+        bob = _bob;
+        isAliceTurn = true;
+    }
+
+    function move(Sig sig, int64 pos, int64 player) public {
+        if (isAliceTurn) {
+            require(player == 1);
+            require(checkSig(sig, alice));
+        } else {
+            require(player == 2);
+            require(checkSig(sig, bob));
+        }
+
+        require(getCell(pos) == 0);
+        setCell(pos, player);
+        isAliceTurn = !isAliceTurn;
+
+        require(true);
+    }
+
+    function getCell(int64 pos) private returns (int64) {
+        if (pos == 0) return c0;
+        if (pos == 1) return c1;
+        if (pos == 2) return c2;
+        if (pos == 3) return c3;
+        if (pos == 4) return c4;
+        if (pos == 5) return c5;
+        if (pos == 6) return c6;
+        if (pos == 7) return c7;
+        if (pos == 8) return c8;
+        return 0;
+    }
+
+    function setCell(int64 pos, int64 value) private {
+        if (pos == 0) c0 = value;
+        if (pos == 1) c1 = value;
+        if (pos == 2) c2 = value;
+        if (pos == 3) c3 = value;
+        if (pos == 4) c4 = value;
+        if (pos == 5) c5 = value;
+        if (pos == 6) c6 = value;
+        if (pos == 7) c7 = value;
+        if (pos == 8) c8 = value;
+    }
+}
+```
+
+Functions with `private` visibility are helper methods that get inlined at their call sites during compilation.
+
+## Key Differences from EVM Solidity
+
+If you are coming from Ethereum development, these differences are critical to understand:
+
+| Concept | EVM Solidity | Runar Solidity |
+| --- | --- | --- |
+| **Execution model** | Account-based, persistent storage | UTXO-based, locking/unlocking scripts |
+| **State persistence** | `storage` variables persist across calls | State is carried forward via OP_PUSH_TX covenant |
+| **`msg.sender`** | Available in every call | Not available. Use signature verification instead. |
+| **`msg.value`** | ETH attached to call | Not available. Use preimage extraction for satoshi amounts. |
+| **`payable`** | Controls ETH receiving | Not applicable. All UTXOs carry satoshis. |
+| **`external`/`internal`** | Visibility modifiers | Only `public` and `private` are supported. |
+| **`view`/`pure`** | State mutability modifiers | Not supported. All methods either read or modify state. |
+| **`mapping`** | Hash-based key-value store | Not supported. Use fixed arrays or individual fields. |
+| **`event`** | Emits log entries | Not supported. No event/log system in Bitcoin Script. |
+| **`modifier`** | Reusable function modifiers | Not supported. Use private helper functions. |
+| **`revert()`** | Revert with message | Use `require(false)` or `assert(false)`. No revert messages. |
+| **`this`** | Contract address | Not available. Use `self` fields directly. |
+| **`address`** | 20-byte Ethereum address | Use `Addr` type (also 20 bytes, but BSV address). |
+| **Inheritance** | Multiple inheritance with `is` | Only `is SmartContract` or `is StatefulSmartContract`. |
+| **Gas** | Per-opcode metering | No gas. Script size and stack depth are the constraints. |
+
+### No msg.sender
+
+The most significant difference for Ethereum developers. In EVM Solidity, `msg.sender` gives you the caller's address for free. In Runar Solidity, there is no concept of a caller address. Instead, you verify identity through cryptographic signatures:
+
+```solidity
+// EVM pattern (NOT available in Runar)
+// require(msg.sender == owner);
+
+// Runar pattern: verify a signature instead
+function withdraw(Sig ownerSig) public {
+    require(checkSig(ownerSig, owner));
+}
+```
+
+### No Mappings
+
+EVM Solidity's `mapping` type has no equivalent in Bitcoin Script. Use individual state fields or fixed arrays:
+
+```solidity
+// EVM pattern (NOT available in Runar)
+// mapping(address => uint256) balances;
+
+// Runar pattern: use fixed arrays or individual fields
+int64[10] balances;  // fixed array of 10 balances
+```
+
+## Types in Solidity Contracts
+
+The Runar Solidity frontend provides its own set of types that map to on-chain constructs.
+
+| Solidity Type | Equivalent TypeScript Type | Description |
+| --- | --- | --- |
+| `int64` | `bigint` | Integer values. The only numeric type. |
+| `bool` | `boolean` | Boolean values. |
+| `bytes` | `ByteString` | Variable-length byte sequence. |
+| `PubKey` | `PubKey` | 33-byte compressed public key. |
+| `Sig` | `Sig` | DER-encoded signature (affine type). |
+| `Sha256` | `Sha256` | 32-byte SHA-256 digest. |
+| `Ripemd160` | `Ripemd160` | 20-byte RIPEMD-160 digest. |
+| `Addr` | `Addr` | 20-byte address. |
+| `SigHashPreimage` | `SigHashPreimage` | Transaction preimage (affine type). |
+| `Point` | `Point` | 64-byte elliptic curve point. |
+| `RabinSig` | `RabinSig` | Rabin signature. |
+| `RabinPubKey` | `RabinPubKey` | Rabin public key. |
+| `T[N]` | `FixedArray<T, N>` | Fixed-size array. `N` must be a compile-time constant. |
+
+Standard Solidity types like `uint256`, `int256`, `address`, `string`, `bytes32`, and `mapping` are **not** available. Use the Runar types listed above.
+
+## Built-in Functions
+
+Built-in functions are available globally, similar to Solidity's global functions:
+
+### Cryptographic Functions
+
+```solidity
+checkSig(sig, pubKey)
+checkMultiSig(sigs, pubKeys)
+hash256(data)
+hash160(data)
+sha256(data)
+ripemd160(data)
+checkPreimage(preimage)
+```
+
+### Byte Operations
+
+```solidity
+len(data)
+cat(a, b)
+substr(data, start, length)
+left(data, length)
+right(data, length)
+split(data, position)
+reverseBytes(data)
+toByteString(value)
+```
+
+### Math Functions
+
+```solidity
+abs(x)
+min(a, b)
+max(a, b)
+within(x, low, high)
+safediv(a, b)
+safemod(a, b)
+clamp(x, low, high)
+pow(base, exp)
+sqrt(x)
+```
+
+### Control Functions
+
+```solidity
+require(condition)    // Primary assertion function
+assert(condition)     // Also available, identical behavior
+```
+
+Both `require()` and `assert()` are available and behave identically -- they abort script execution if the condition is false. There is no distinction between "validation" and "internal" errors as there is in EVM Solidity, because there are no gas refund semantics.
+
+## Control Flow
+
+### For Loops
+
+Only `for` loops with compile-time constant bounds:
+
+```solidity
+int64 sum = 0;
+for (int64 i = 0; i < 10; i++) {
+    sum = sum + balances[i];
+}
+```
+
+### Conditionals
+
+Standard `if`/`else if`/`else`:
+
+```solidity
+if (amount > threshold) {
+    balance = balance - amount;
+} else if (amount == threshold) {
+    balance = 0;
+} else {
+    require(false);
+}
+```
+
+The ternary operator also works:
+
+```solidity
+int64 fee = amount > 1000 ? 10 : 1;
+```
+
+### Disallowed Solidity Features
+
+The following standard Solidity features are not available in Runar contracts:
+
+- `while` and `do-while` loops
+- `mapping` type
+- `struct` definitions (use contract state fields directly)
+- `enum` definitions
+- `event` and `emit`
+- `modifier` keyword
+- `interface` and `abstract contract`
+- `library` definitions
+- `using ... for` directives
+- `external`, `internal` visibility (only `public` and `private`)
+- `view`, `pure` state mutability
+- `payable` modifier
+- `fallback` and `receive` functions
+- `try`/`catch`
+- `new` (creating contracts from contracts)
+- `selfdestruct`
+- `msg`, `block`, `tx` global variables
+- `abi.encode`, `abi.decode`
+- Assembly blocks (`assembly { }`)
+- Inheritance from multiple contracts
+- `uint256`, `int256`, `uint8`, etc. (use `int64`)
+- `string` type (use `bytes`)
+- `address` type (use `Addr`)
+
+## Compiling Solidity Contracts
+
+```bash
+runar compile contracts/P2PKH.runar.sol --output ./artifacts
+```
+
+The compiler's Solidity frontend parses the `.runar.sol` file, translates it to the shared IR, and produces the standard JSON artifact. No external Solidity compiler (solc) is involved.
+
+To compile all Solidity contracts:
+
+```bash
+runar compile contracts/*.runar.sol --output ./artifacts
+```
+
+## Testing Solidity Contracts
+
+Since the Solidity frontend produces the same JSON artifacts as all other languages, tests are written in TypeScript using vitest:
+
+```typescript
+import { expect, test } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { readFileSync } from 'node:fs';
+
+const source = readFileSync('./contracts/Counter.runar.sol', 'utf8');
+
+test('Counter increment', () => {
+  const counter = TestContract.fromSource(source, { count: 0n }, 'Counter.runar.sol');
+  counter.call('increment', {});
+  expect(counter.state.count).toBe(1n);
+});
+```
+
+Run tests with:
+
+```bash
+runar test
+```
+
+## Mapping Common Solidity Patterns to Runar
+
+### Access Control
+
+```solidity
+// EVM: require(msg.sender == owner)
+// Runar:
+function withdraw(Sig ownerSig, int64 amount) public {
+    require(checkSig(ownerSig, owner));
+    require(amount > 0);
+}
+```
+
+### Token Balance Updates
+
+```solidity
+// EVM: balances[msg.sender] -= amount; balances[recipient] += amount;
+// Runar: explicit state fields
+function transfer(Sig senderSig, int64 amount) public {
+    require(checkSig(senderSig, sender));
+    require(amount > 0);
+    require(senderBalance >= amount);
+    senderBalance = senderBalance - amount;
+    receiverBalance = receiverBalance + amount;
+    require(true);
+}
+```
+
+### Time Locks
+
+```solidity
+// EVM: require(block.timestamp >= unlockTime)
+// Runar: use preimage extraction for locktime
+function claim(Sig ownerSig, SigHashPreimage preimage) public {
+    require(checkPreimage(preimage));
+    require(extractLocktime(preimage) >= unlockTime);
+    require(checkSig(ownerSig, owner));
+}
+```
+
+## Next Steps
+
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Move Contracts](/docs/en/writing-contracts/move-contracts) -- Write contracts in Move syntax
+- [Language Feature Matrix](/docs/en/writing-contracts/language-feature-matrix) -- Compare all six languages

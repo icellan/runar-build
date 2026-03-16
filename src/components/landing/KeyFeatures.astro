@@ -1,0 +1,16 @@
+---
+import SectionLabel from './SectionLabel.astro';
+import FeatureCard from './FeatureCard.astro';
+import { features } from '@data/features';
+---
+
+<section class="py-24 px-4">
+  <div class="max-w-6xl mx-auto">
+    <SectionLabel number="03" title="Features" />
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {features.map(feature => (
+        <FeatureCard title={feature.title} description={feature.description} />
+      ))}
+    </div>
+  </div>
+</section>

@@ -1,0 +1,55 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import Header from '@components/shared/Header.astro';
+import Footer from '@components/shared/Footer.astro';
+import Sidebar from '@components/docs/Sidebar.astro';
+import Breadcrumb from '@components/docs/Breadcrumb.astro';
+import Pagination from '@components/docs/Pagination.astro';
+import TableOfContents from '@components/docs/TableOfContents';
+import MobileSidebar from '@components/docs/MobileSidebar';
+import { getFlatNavigation } from '@data/navigation';
+
+interface Props {
+  title: string;
+  description?: string;
+  sectionTitle: string;
+  headings: { depth: number; slug: string; text: string }[];
+}
+
+const { title, description, sectionTitle, headings } = Astro.props;
+
+const currentPath = Astro.url.pathname.replace(/\/$/, '');
+const flatNav = getFlatNavigation();
+const currentIndex = flatNav.findIndex(item => item.path === currentPath);
+const prev = currentIndex > 0 ? flatNav[currentIndex - 1] : undefined;
+const next = currentIndex < flatNav.length - 1 ? flatNav[currentIndex + 1] : undefined;
+---
+
+<BaseLayout title={`${title} — Rúnar Docs`} description={description}>
+  <Header variant="docs" />
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <!-- Mobile sidebar toggle -->
+    <div class="lg:hidden py-3 border-b border-border">
+      <MobileSidebar client:load currentPath={currentPath} />
+    </div>
+
+    <div class="flex gap-8 py-8">
+      <!-- Desktop sidebar -->
+      <Sidebar currentPath={currentPath} />
+
+      <!-- Main content -->
+      <article class="min-w-0 flex-1" data-pagefind-body>
+        <Breadcrumb sectionTitle={sectionTitle} pageTitle={title} />
+        <div class="prose">
+          <h1>{title}</h1>
+          <slot />
+        </div>
+        <Pagination prev={prev} next={next} />
+      </article>
+
+      <!-- Table of Contents -->
+      <TableOfContents client:idle headings={headings} />
+    </div>
+  </div>
+  <Footer />
+</BaseLayout>

@@ -1,0 +1,355 @@
+---
+title: "Contract Basics"
+description: "Core concepts for writing Runar contracts."
+section: "writing-contracts"
+order: 10
+lang: "en"
+---
+
+Runar contracts are high-level programs that compile to Bitcoin Script and execute within BSV transactions. This page covers the foundational concepts you need before writing your first contract -- the two contract models, the type system, built-in functions, and the constraints that make on-chain execution safe and deterministic.
+
+## The Two Contract Models
+
+Every Runar contract extends one of two base classes. Your choice determines whether the contract is single-use or carries state forward across transactions.
+
+### SmartContract (Stateless)
+
+`SmartContract` is the simplest model. All properties are `readonly` and are baked into the locking script when the contract is deployed. Once a UTXO locked by a `SmartContract` is spent, that contract instance is consumed and gone. There is no state to carry forward.
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, Ripemd160, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Ripemd160;
+
+  constructor(pubKeyHash: Ripemd160) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+```
+
+Use `SmartContract` for payment conditions, hash locks, time locks, multi-signature schemes, escrow, and any contract where the spending conditions are fixed at creation time.
+
+### StatefulSmartContract (Mutable State)
+
+`StatefulSmartContract` is for contracts that maintain and evolve state across transactions. Under the hood, it uses the OP_PUSH_TX pattern: when a stateful contract is spent, the compiler automatically injects preimage verification at method entry and state continuation at method exit, ensuring the spending transaction creates a new output containing the updated state.
+
+```typescript
+import { StatefulSmartContract, assert } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor() {
+    super();
+    this.count = 0n;
+  }
+
+  public increment() {
+    this.count = this.count + 1n;
+    assert(true);
+  }
+
+  public decrement() {
+    assert(this.count > 0n);
+    this.count = this.count - 1n;
+    assert(true);
+  }
+}
+```
+
+Stateful contracts can access `this.txPreimage` to inspect the serialized transaction preimage. For multi-output transactions, use `this.addOutput(satoshis, ...values)` to append additional outputs beyond the default state continuation output.
+
+Use `StatefulSmartContract` for counters, token balances, voting tallies, auctions, games, and any contract that needs to evolve over time.
+
+## Import and File Structure
+
+Contracts import types and built-in functions from `runar-lang` (for TypeScript). Each contract file must contain exactly one contract class -- multiple classes per file are not allowed.
+
+```typescript
+import { SmartContract, assert, PubKey, Sig, checkSig } from 'runar-lang';
+```
+
+Contract files use the `.runar.ts` extension (or the equivalent for other languages: `.runar.go`, `.runar.rs`, `.runar.py`, `.runar.sol`, `.runar.move`). This extension signals to the Runar compiler that the file should be compiled to Bitcoin Script rather than executed as normal source code.
+
+## Constructor Pattern
+
+Every contract must define a constructor that calls `super()` with the same arguments that become readonly properties.
+
+For `SmartContract`, pass all readonly property values to `super()`:
+
+```typescript
+constructor(pubKeyHash: Ripemd160) {
+  super(pubKeyHash);
+  this.pubKeyHash = pubKeyHash;
+}
+```
+
+For `StatefulSmartContract`, call `super()` with no arguments and initialize mutable state directly:
+
+```typescript
+constructor() {
+  super();
+  this.count = 0n;
+}
+```
+
+The `super()` call is required. Omitting it is a compile-time error.
+
+## Properties: Readonly vs. Mutable
+
+**Readonly properties** are declared with the `readonly` keyword. They are fixed at deployment time and embedded directly into the locking script. Both `SmartContract` and `StatefulSmartContract` can have readonly properties.
+
+**Mutable properties** (without `readonly`) are only available in `StatefulSmartContract`. They represent on-chain state that can change with each transaction. When a public method modifies a mutable property, the updated value is encoded into the new output's locking script.
+
+```typescript
+class Auction extends StatefulSmartContract {
+  readonly auctioneer: PubKey;   // fixed at deployment
+  highestBidder: PubKey;         // changes with each bid
+  highestBid: bigint;            // changes with each bid
+}
+```
+
+In a `SmartContract`, all properties must be `readonly`. Attempting to declare a mutable property in a `SmartContract` is a compile-time error.
+
+## Public vs. Private Methods
+
+**Public methods** are the contract's entry points -- they define the spending conditions that must be satisfied to unlock the UTXO. Each public method receives arguments from the unlocking script and must end with a call to `assert()`. If all assertions pass, the script succeeds and the UTXO is spent.
+
+```typescript
+public unlock(sig: Sig, pubKey: PubKey) {
+  assert(hash160(pubKey) === this.pubKeyHash);
+  assert(checkSig(sig, pubKey));
+}
+```
+
+Every public method must contain at least one `assert()` call. A public method that does not assert anything is a compile-time error.
+
+**Private methods** are internal helpers. They are inlined at their call sites during compilation -- there is no function call overhead at the script level. Private methods cannot be called from outside the contract.
+
+```typescript
+private checkOwnership(sig: Sig, pubKey: PubKey): boolean {
+  return hash160(pubKey) === this.ownerHash && checkSig(sig, pubKey);
+}
+
+public spend(sig: Sig, pubKey: PubKey) {
+  assert(this.checkOwnership(sig, pubKey));
+}
+```
+
+## The Type System
+
+Runar enforces a strict, static type system. Every variable, parameter, and property must have a known type at compile time.
+
+### Primitive Types
+
+| Type | Description |
+| --- | --- |
+| `bigint` | Arbitrary-precision integer. The only numeric type allowed in contracts. Use `0n` suffix for literals. |
+| `boolean` | `true` or `false`. |
+
+The JavaScript `number` type is **not** allowed in contracts. Use `bigint` exclusively for all numeric values.
+
+### ByteString Types
+
+All byte-oriented types are domain subtypes of `ByteString`. They share the same underlying representation but carry semantic meaning and length constraints.
+
+| Type | Size | Description |
+| --- | --- | --- |
+| `ByteString` | Variable | Raw byte sequence. Base type for all byte-oriented data. |
+| `PubKey` | 33 bytes | Compressed SEC public key. |
+| `Sig` | DER-encoded signature (variable length, typically 70-73 bytes) | DER-encoded ECDSA signature. **Affine type** -- must be consumed exactly once. |
+| `Sha256` | 32 bytes | SHA-256 hash digest. |
+| `Ripemd160` | 20 bytes | RIPEMD-160 hash digest. |
+| `Addr` | 20 bytes | Address (equivalent to `Ripemd160` of a public key hash). |
+| `SigHashPreimage` | Variable | Serialized transaction preimage. **Affine type** -- must be consumed exactly once. |
+| `Point` | 64 bytes | Uncompressed elliptic curve point (x, y coordinates). |
+
+### Rabin Types
+
+These are `bigint` subtypes used for Rabin signature verification (oracle patterns).
+
+| Type | Description |
+| --- | --- |
+| `RabinSig` | Rabin signature value. |
+| `RabinPubKey` | Rabin public key value. |
+
+### Generic Types
+
+| Type | Description |
+| --- | --- |
+| `FixedArray<T, N>` | Fixed-length array of type `T` with `N` elements. `N` must be a compile-time constant. |
+
+Dynamic arrays are not supported. All array sizes must be known at compile time.
+
+### Affine Types
+
+`Sig` and `SigHashPreimage` are **affine types** -- they must be consumed exactly once within a method body. You cannot use a `Sig` value twice (for example, passing the same signature to two different `checkSig` calls) or ignore it entirely. The compiler enforces this constraint to prevent signature malleability and replay issues.
+
+## Built-in Functions
+
+Runar provides a comprehensive set of built-in functions that map directly to Bitcoin Script opcodes or verified script patterns.
+
+### Cryptographic Functions
+
+| Function | Description |
+| --- | --- |
+| `checkSig(sig, pubKey)` | Verify an ECDSA signature against a public key. |
+| `checkMultiSig(sigs, pubKeys)` | Verify multiple signatures against multiple public keys (M-of-N). |
+| `hash256(data)` | Double SHA-256 hash (SHA-256 of SHA-256). |
+| `hash160(data)` | RIPEMD-160 of SHA-256 (standard Bitcoin address hash). |
+| `sha256(data)` | Single SHA-256 hash. |
+| `ripemd160(data)` | Single RIPEMD-160 hash. |
+| `checkPreimage(preimage)` | Verify a sighash preimage against the current transaction. |
+
+### Post-Quantum Cryptography
+
+| Function | Description |
+| --- | --- |
+| `verifyWOTS(...)` | Verify a Winternitz One-Time Signature. |
+| `verifySLHDSA_SHA2_128s(...)` | Verify an SLH-DSA (SPHINCS+) signature, SHA2-128s parameter set. |
+| `verifySLHDSA_SHA2_128f(...)` | Verify an SLH-DSA signature, SHA2-128f parameter set. |
+
+### Oracle Functions
+
+| Function | Description |
+| --- | --- |
+| `verifyRabinSig(msg, sig, padding, pubKey)` | Verify a Rabin signature from an oracle. |
+
+### Elliptic Curve Functions
+
+| Function | Description |
+| --- | --- |
+| `ecAdd(p1, p2)` | Add two elliptic curve points. |
+| `ecMul(point, scalar)` | Multiply an elliptic curve point by a scalar. |
+| `ecMulGen(scalar)` | Multiply the generator point by a scalar. |
+| `ecNegate(point)` | Negate an elliptic curve point. |
+| `ecOnCurve(point)` | Check if a point lies on the secp256k1 curve. |
+| `ecModReduce(value)` | Reduce a value modulo the curve order. |
+| `ecEncodeCompressed(point)` | Encode a point in compressed SEC format. |
+| `ecMakePoint(x, y)` | Construct a point from x and y coordinates. |
+| `ecPointX(point)` | Extract the x-coordinate from a point. |
+| `ecPointY(point)` | Extract the y-coordinate from a point. |
+
+### Byte Operations
+
+| Function | Description |
+| --- | --- |
+| `len(data)` | Return the byte length of a `ByteString`. |
+| `cat(a, b)` | Concatenate two `ByteString` values. |
+| `substr(data, start, length)` | Extract a substring of bytes. |
+| `left(data, length)` | Take the leftmost `length` bytes. |
+| `right(data, length)` | Take the rightmost `length` bytes. |
+| `split(data, position)` | Split a `ByteString` at a position, returning two parts. |
+| `reverseBytes(data)` | Reverse the byte order. |
+| `toByteString(value)` | Cast a hex string to `ByteString`. |
+
+### Conversion Functions
+
+| Function | Description |
+| --- | --- |
+| `num2bin(num, length)` | Convert a `bigint` to a `ByteString` of specified length. |
+| `bin2num(data)` | Convert a `ByteString` to a `bigint`. |
+| `int2str(value, byteLen)` | Convert an integer to a `ByteString` of specified byte length. |
+| `bool(value)` | Convert a value to a `boolean`. |
+
+### Math Functions
+
+| Function | Description |
+| --- | --- |
+| `abs(x)` | Absolute value. |
+| `min(a, b)` | Minimum of two values. |
+| `max(a, b)` | Maximum of two values. |
+| `within(x, low, high)` | Check if `x` is in the range `[low, high)`. |
+| `safediv(a, b)` | Integer division with divide-by-zero protection. |
+| `safemod(a, b)` | Modulo with divide-by-zero protection. |
+| `clamp(x, low, high)` | Clamp a value to the range `[low, high]`. |
+| `mulDiv(a, b, c)` | Compute `(a * b) / c` with intermediate precision. |
+| `percentOf(amount, basisPoints)` | Calculate a percentage in basis points. |
+| `sign(x)` | Return the sign of a value (-1, 0, or 1). |
+| `pow(base, exp)` | Exponentiation (exponent must be a compile-time constant). |
+| `sqrt(x)` | Integer square root. |
+| `gcd(a, b)` | Greatest common divisor. |
+| `divmod(a, b)` | Return both quotient and remainder. |
+| `log2(x)` | Integer base-2 logarithm. |
+
+### Control Functions
+
+| Function | Description |
+| --- | --- |
+| `assert(condition)` | Abort execution if `condition` is false. Required in every public method. |
+
+### State Functions (StatefulSmartContract only)
+
+| Function | Description |
+| --- | --- |
+| `this.addOutput(satoshis, ...values)` | Add a continuation output with the specified satoshi amount and updated state values. |
+| `this.addRawOutput(satoshis, scriptBytes)` | Add a raw output with caller-specified script bytes (not a stateful continuation). |
+
+### Preimage Extraction Functions
+
+These functions extract fields from a `SigHashPreimage`. They are primarily used in advanced covenant patterns within `StatefulSmartContract`.
+
+| Function | Description |
+| --- | --- |
+| `extractVersion(preimage)` | Transaction version (4 bytes). |
+| `extractHashPrevouts(preimage)` | Hash of all input outpoints. |
+| `extractHashSequence(preimage)` | Hash of all input sequence numbers. |
+| `extractOutpoint(preimage)` | Outpoint of the current input (txid + vout). |
+| `extractInputIndex(preimage)` | Index of the current input. |
+| `extractScriptCode(preimage)` | The script code being executed. |
+| `extractAmount(preimage)` | Value of the current input in satoshis. |
+| `extractSequence(preimage)` | Sequence number of the current input. |
+| `extractOutputHash(preimage)` / `extractOutputs(preimage)` | Hash of all outputs (or the outputs themselves). |
+| `extractLocktime(preimage)` | Transaction locktime. |
+| `extractSigHashType(preimage)` | Sighash type flag. |
+
+## Disallowed Features
+
+Bitcoin Script is intentionally not Turing-complete. To guarantee termination and deterministic execution, Runar disallows several features that are common in general-purpose programming:
+
+| Feature | Why It Is Disallowed |
+| --- | --- |
+| `while` / `do-while` loops | Could cause non-termination. Use `for` loops with compile-time constant bounds instead. |
+| Recursion | Could cause non-termination or unbounded stack growth. |
+| `async` / `await` | No asynchronous execution on-chain. |
+| Closures / arrow functions | No first-class functions in Bitcoin Script. |
+| `try` / `catch` | No exception handling. Use `assert()` for control flow. |
+| `any` / `unknown` types | All types must be statically known. |
+| Dynamic arrays | Array sizes must be compile-time constants. Use `FixedArray<T, N>`. |
+| `number` type | Use `bigint` exclusively. |
+| Decorators | Not supported in TypeScript contracts. Python contracts use `@public` to mark entry points. |
+| Arbitrary function calls | Only built-in functions and private methods are callable. |
+| Arbitrary imports | Only `runar-lang` imports are allowed. |
+| Multiple classes per file | Each file must contain exactly one contract class. |
+| Enums | Not supported. Use `bigint` constants instead. |
+| Interfaces / type aliases | Not supported. Use concrete types. |
+| Template literals | Not supported. Use `cat()` for string concatenation. |
+| Optional chaining (`?.`) | Not supported. All values must be non-nullable. |
+| Spread operator (`...`) | Not supported. |
+| `typeof` / `instanceof` | No runtime type checks. Types are enforced at compile time. |
+| `new` expressions | Cannot instantiate objects within a contract. |
+
+## Key Compilation Properties
+
+Understanding how the compiler transforms your code helps you write efficient contracts.
+
+**Loop unrolling.** All `for` loops are unrolled at compile time. The loop bounds must be compile-time constants. A loop like `for (let i = 0n; i < 10n; i++)` generates 10 copies of the loop body in the resulting script.
+
+**Private method inlining.** Private methods are inlined at their call sites during compilation. There is no function call mechanism in Bitcoin Script, so every private method call is replaced with the method's body.
+
+**Eager evaluation.** Logical operators `&&` and `||` evaluate **both** sides regardless of the first operand's value. This differs from JavaScript's short-circuit evaluation. If the right side has side effects or expensive computation, both will execute.
+
+**Maximum stack depth.** The BSV runtime enforces a maximum stack depth of 800 elements. Contracts that exceed this limit will fail at execution time. Keep this in mind when using large `FixedArray` values or deeply nested computations.
+
+## Next Steps
+
+- [TypeScript Contracts](/docs/en/writing-contracts/typescript-contracts) -- The primary and most mature language frontend
+- [Language Feature Matrix](/docs/en/writing-contracts/language-feature-matrix) -- Compare syntax across all six languages
+- [Contract Examples](/docs/en/examples/gallery) -- See complete working contracts

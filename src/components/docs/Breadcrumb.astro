@@ -1,0 +1,24 @@
+---
+interface Props {
+  sectionTitle: string;
+  pageTitle: string;
+}
+
+const { sectionTitle, pageTitle } = Astro.props;
+---
+
+<nav aria-label="Breadcrumb" class="mb-4">
+  <ol class="flex items-center gap-1.5 text-sm text-text-tertiary">
+    <li>
+      <a href="/docs/getting-started/overview" class="hover:text-text-secondary transition-colors">Docs</a>
+    </li>
+    <li class="select-none">/</li>
+    <li>
+      <span class="text-text-secondary">{sectionTitle}</span>
+    </li>
+    <li class="select-none">/</li>
+    <li>
+      <span class="text-text">{pageTitle}</span>
+    </li>
+  </ol>
+</nav>

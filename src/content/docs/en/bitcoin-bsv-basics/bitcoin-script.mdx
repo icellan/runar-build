@@ -1,0 +1,241 @@
+---
+title: "Bitcoin Script"
+description: "An introduction to Bitcoin's scripting language."
+section: "bitcoin-bsv-basics"
+order: 20
+lang: "en"
+---
+
+Bitcoin Script is the low-level, stack-based programming language that defines spending conditions for every UTXO on the BSV network. Runar compiles high-level contract code down to Bitcoin Script, so you rarely need to write Script directly --- but understanding how it works gives you a much deeper grasp of what your contracts are actually doing on-chain.
+
+## Stack-Based Execution Model
+
+Bitcoin Script is a **stack-based** language, similar in concept to Forth or PostScript. There are no variables, no named registers, and no random memory access. All computation happens on a single data stack using **postfix notation**: data is pushed onto the stack, then operators consume items from the top of the stack and push results back.
+
+Here is a trivial example --- adding two numbers:
+
+```
+Script:  OP_2 OP_3 OP_ADD
+
+Execution:
+  Step 1: OP_2    --> stack: [2]
+  Step 2: OP_3    --> stack: [2, 3]
+  Step 3: OP_ADD  --> pops 3 and 2, pushes 5 --> stack: [5]
+```
+
+A script is considered **successful** if execution completes without error and the top element on the stack is a non-zero value (truthy). If the stack is empty or the top value is zero (or an empty byte array), the script fails.
+
+### The Two-Script Model
+
+Script execution in Bitcoin works by combining two scripts:
+
+1. **Locking script** (`scriptPubKey`) --- set by the creator of the UTXO, defines the spending conditions.
+2. **Unlocking script** (`scriptSig`) --- provided by the spender, supplies the data needed to satisfy the conditions.
+
+During validation, the miner first executes the unlocking script on an empty stack, then executes the locking script on the resulting stack. If the combined execution succeeds, the spend is valid.
+
+```
+Unlocking script:  <sig> <pubKey>
+Locking script:    OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
+
+Combined execution (P2PKH):
+  Step 1: <sig>            --> stack: [sig]
+  Step 2: <pubKey>         --> stack: [sig, pubKey]
+  Step 3: OP_DUP           --> stack: [sig, pubKey, pubKey]
+  Step 4: OP_HASH160       --> stack: [sig, pubKey, hash(pubKey)]
+  Step 5: <pubKeyHash>     --> stack: [sig, pubKey, hash(pubKey), pubKeyHash]
+  Step 6: OP_EQUALVERIFY   --> verifies hash(pubKey) == pubKeyHash, stack: [sig, pubKey]
+  Step 7: OP_CHECKSIG      --> verifies sig against pubKey, stack: [true]
+
+Result: true on stack --> spend is valid.
+```
+
+## Common Opcodes
+
+Bitcoin Script has a rich set of opcodes. BSV restored the original Bitcoin protocol opcodes that were disabled in BTC, giving contracts access to the full instruction set. Here are the key categories:
+
+### Stack Manipulation
+
+These opcodes rearrange data on the stack without performing computation.
+
+| Opcode | Effect | Description |
+|---|---|---|
+| `OP_DUP` | `[x] -> [x, x]` | Duplicate the top stack element |
+| `OP_SWAP` | `[x, y] -> [y, x]` | Swap the top two elements |
+| `OP_PICK` | `[xn..x0, n] -> [xn..x0, xn]` | Copy the nth item to the top |
+| `OP_ROLL` | `[xn..x0, n] -> [xn-1..x0, xn]` | Move the nth item to the top |
+| `OP_DROP` | `[x] -> []` | Remove the top element |
+| `OP_NIP` | `[x, y] -> [y]` | Remove the second element |
+| `OP_OVER` | `[x, y] -> [x, y, x]` | Copy the second element to the top |
+| `OP_ROT` | `[x, y, z] -> [y, z, x]` | Rotate the top three elements |
+| `OP_TUCK` | `[x, y] -> [y, x, y]` | Copy top element below second |
+
+Runar's compiler generates stack manipulation sequences automatically when translating high-level variable access into stack operations. This is one of the most complex parts of the compilation process.
+
+### Arithmetic
+
+| Opcode | Effect | Description |
+|---|---|---|
+| `OP_ADD` | `[a, b] -> [a+b]` | Addition |
+| `OP_SUB` | `[a, b] -> [a-b]` | Subtraction |
+| `OP_MUL` | `[a, b] -> [a*b]` | Multiplication (restored in BSV) |
+| `OP_DIV` | `[a, b] -> [a/b]` | Integer division (restored in BSV) |
+| `OP_MOD` | `[a, b] -> [a%b]` | Modulo (restored in BSV) |
+| `OP_NEGATE` | `[a] -> [-a]` | Negate |
+| `OP_ABS` | `[a] -> [abs(a)]` | Absolute value |
+| `OP_NUMEQUAL` | `[a, b] -> [a==b]` | Numeric equality |
+| `OP_LESSTHAN` | `[a, b] -> [a<b]` | Less than comparison |
+| `OP_GREATERTHAN` | `[a, b] -> [a>b]` | Greater than comparison |
+
+Note that `OP_MUL`, `OP_DIV`, and `OP_MOD` were disabled in BTC but are fully available on BSV, which restored the original Bitcoin protocol.
+
+### Cryptographic Operations
+
+| Opcode | Effect | Description |
+|---|---|---|
+| `OP_SHA256` | `[data] -> [sha256(data)]` | SHA-256 hash |
+| `OP_HASH160` | `[data] -> [ripemd160(sha256(data))]` | Double hash (used in addresses) |
+| `OP_HASH256` | `[data] -> [sha256(sha256(data))]` | Double SHA-256 |
+| `OP_CHECKSIG` | `[sig, pubKey] -> [bool]` | Verify ECDSA signature |
+| `OP_CHECKMULTISIG` | `[sigs..., pubKeys...] -> [bool]` | Verify M-of-N multisig |
+| `OP_CHECKDATASIG` | `[sig, msg, pubKey] -> [bool]` | Verify signature on arbitrary data (restored in BSV) |
+
+`OP_CHECKSIG` is the cornerstone of authorization on Bitcoin. It verifies that a transaction input was signed by the holder of a specific private key. The OP_PUSH_TX technique (covered in [How Smart Contracts Work on BSV](/docs/en/bitcoin-bsv-basics/how-smart-contracts-work-on-bsv)) uses `OP_CHECKSIG` in a novel way to enable transaction introspection.
+
+### Flow Control
+
+| Opcode | Effect | Description |
+|---|---|---|
+| `OP_IF` | Conditional branch | Execute next block if top stack value is true |
+| `OP_ELSE` | Alternative branch | Execute if the preceding `OP_IF` was false |
+| `OP_ENDIF` | End conditional | Close the `OP_IF`/`OP_ELSE` block |
+| `OP_VERIFY` | `[x] -> []` | Fail script immediately if top value is false |
+| `OP_RETURN` | Marks unspendable output | Used for data storage and state serialization |
+| `OP_EQUALVERIFY` | `[a, b] -> []` | `OP_EQUAL` followed by `OP_VERIFY` |
+
+Runar uses `OP_IF`/`OP_ELSE`/`OP_ENDIF` to compile conditional expressions (`if`/`else` in your source language) and to implement **multi-method dispatch** --- selecting which contract method to execute based on the first argument in the unlocking script.
+
+### Data Operations
+
+| Opcode | Effect | Description |
+|---|---|---|
+| `OP_CAT` | `[a, b] -> [a+b]` | Concatenate two byte strings (restored in BSV) |
+| `OP_SPLIT` | `[data, n] -> [data[:n], data[n:]]` | Split byte string at position n |
+| `OP_NUM2BIN` | `[num, size] -> [bin]` | Convert number to fixed-size binary |
+| `OP_BIN2NUM` | `[bin] -> [num]` | Convert binary to number |
+| `OP_SIZE` | `[data] -> [data, len]` | Push length of top element (without consuming it) |
+
+`OP_CAT` is particularly important for BSV smart contracts. It was disabled in BTC but restored on BSV, and it enables the construction of the sighash preimage needed for the OP_PUSH_TX technique.
+
+## Script Evaluation Rules
+
+Bitcoin Script has several important properties that distinguish it from general-purpose programming languages:
+
+### No Unbounded Loops
+
+Bitcoin Script has **no loop opcodes**. There is no `OP_LOOP`, no `OP_GOTO`, no recursion. Every script follows a straight-line execution path with conditional branches but no backward jumps. This guarantees that:
+
+- **Every script terminates** --- there is no halting problem. Miners can always determine in bounded time whether a script is valid.
+- **Execution cost is predictable** --- the maximum number of operations is bounded by the script length itself.
+- **No gas mechanism is needed** --- unlike Ethereum, which uses gas to bound execution, Bitcoin Script's termination is structural.
+
+This is an intentional design choice, not a limitation. It means that a miner can look at a script and know, before executing it, an upper bound on how much work it will take. This is critical for a system where miners must validate transactions from untrusted parties.
+
+### No External State Access
+
+A script can only operate on data that is explicitly provided to it:
+
+- Data pushed by the unlocking script
+- Data embedded in the locking script itself
+- The sighash preimage (via OP_PUSH_TX, which makes the spending transaction's data available)
+
+There are no syscalls, no network access, no reads from other UTXOs, and no access to "blockchain state" beyond what is serialized into the transaction. This isolation makes script execution completely deterministic.
+
+### Big Number Arithmetic
+
+BSV restored support for arbitrarily large numbers in script arithmetic. BTC limited script numbers to 4 bytes (roughly -2 billion to +2 billion), but BSV allows numbers of any size, enabling contracts that work with large values, cryptographic quantities, and complex mathematical operations.
+
+## How Runar Targets Bitcoin Script
+
+When you write a Runar contract, the compiler transforms your high-level code through several stages before producing Bitcoin Script. Here is a simplified view of what happens:
+
+### Source Contract (TypeScript)
+
+```typescript
+import { SmartContract, assert, Sha256, ByteString, sha256 } from 'runar-lang';
+
+class HashPuzzle extends SmartContract {
+  readonly hash: Sha256;
+
+  constructor(hash: Sha256) {
+    super(hash);
+    this.hash = hash;
+  }
+
+  public unlock(preimage: ByteString) {
+    assert(sha256(preimage) === this.hash);
+  }
+}
+```
+
+### Compiled Bitcoin Script (Simplified)
+
+```
+// Unlocking script (provided by caller):
+//   <preimage>
+
+// Locking script (compiled by Runar):
+OP_SHA256             // Hash the preimage from the unlocking script
+<committed_hash>      // Push the expected hash (baked into the locking script)
+OP_EQUAL              // Compare: does sha256(preimage) == committed_hash?
+                      // If true, spend succeeds. If false, spend fails.
+```
+
+### What the Compiler Handles
+
+The Runar compiler automates several things that would be extremely tedious to do by hand in raw Bitcoin Script:
+
+1. **Variable-to-stack mapping** --- Your named variables become positions on the stack. The compiler tracks which stack slot holds which value and generates the correct `OP_PICK`, `OP_ROLL`, `OP_SWAP`, and `OP_DUP` sequences to access them.
+
+2. **Type enforcement** --- The compiler ensures that operations are type-safe at compile time. You cannot accidentally compare a public key to a number.
+
+3. **Control flow flattening** --- Your `if`/`else` blocks, `switch` statements, and early returns are translated into `OP_IF`/`OP_ELSE`/`OP_ENDIF` sequences with the correct stack management around each branch.
+
+4. **Method dispatch** --- If your contract has multiple methods, the compiler generates a dispatch table at the start of the locking script that reads the method selector from the unlocking script and jumps to the correct code path.
+
+5. **State serialization** --- For stateful contracts, the compiler generates the code to read state from the current locking script, compute new state, and enforce that the spending transaction creates a new UTXO with the updated locking script.
+
+6. **OP_PUSH_TX boilerplate** --- The complex sighash preimage construction and verification needed for stateful contracts is generated automatically.
+
+## A Compiled Example: P2PKH
+
+To make this concrete, here is how a standard Pay-to-Public-Key-Hash pattern looks at the script level. This is the most common transaction type on Bitcoin and serves as a good illustration of the two-script model:
+
+```
+Locking script (set when the UTXO is created):
+  OP_DUP
+  OP_HASH160
+  <20-byte pubkey hash>
+  OP_EQUALVERIFY
+  OP_CHECKSIG
+
+Unlocking script (provided when spending):
+  <71-byte DER signature>
+  <33-byte compressed public key>
+
+Full execution trace:
+  Stack: []
+  Push <signature>         --> [sig]
+  Push <pubKey>            --> [sig, pubKey]
+  OP_DUP                   --> [sig, pubKey, pubKey]
+  OP_HASH160               --> [sig, pubKey, hash160(pubKey)]
+  Push <pubKeyHash>        --> [sig, pubKey, hash160(pubKey), expectedHash]
+  OP_EQUALVERIFY           --> [sig, pubKey]  (fails if hashes differ)
+  OP_CHECKSIG              --> [true]         (fails if signature is invalid)
+```
+
+Every step is deterministic and verifiable. The miner performs exactly these operations, in this order, with no ambiguity.
+
+## Next Steps
+
+Now that you understand how Bitcoin Script works, the next page covers [Transactions and Outputs](/docs/en/bitcoin-bsv-basics/transactions-and-outputs) --- the data structures that carry scripts on-chain and form the backbone of every contract interaction.

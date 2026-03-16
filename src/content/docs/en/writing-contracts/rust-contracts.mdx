@@ -1,0 +1,491 @@
+---
+title: "Rust Contracts"
+description: "Writing contracts in Rust."
+section: "writing-contracts"
+order: 40
+lang: "en"
+---
+
+Rust contracts in Runar leverage Rust's ownership model and type safety to produce reliable Bitcoin Script. Contracts are defined using attribute macros and compiled through the `runar-rs` frontend, producing the same intermediate representation and Bitcoin Script output as all other Runar languages.
+
+## Prerequisites
+
+- **Rust 1.75+** installed via [rustup](https://rustup.rs/)
+- The `runar-rs` and `runar-lang-macros` crates (installed automatically when using the Runar CLI with Rust contracts)
+
+## File Extension and Crate Structure
+
+Rust contract files use the `.runar.rs` extension. Each contract is a single file containing one struct and its implementation:
+
+```
+contracts/
+  p2pkh.runar.rs
+  counter.runar.rs
+  escrow.runar.rs
+  tictactoe.runar.rs
+```
+
+Every contract file begins with an import from the `runar` prelude:
+
+```rust
+use runar::prelude::*;
+```
+
+This brings in the base contract traits, all on-chain types, built-in functions, and the attribute macros needed for contract definitions.
+
+## Contract Definition with Attribute Macros
+
+Rust contracts are defined using two attribute macros: `#[runar::contract]` on the struct and `#[runar::methods]` on the `impl` block.
+
+### Struct Definition
+
+The `#[runar::contract]` macro marks a struct as a Runar contract. Fields annotated with `#[readonly]` are immutable and baked into the locking script. Fields without `#[readonly]` are mutable state (only valid when extending `StatefulSmartContract`).
+
+```rust
+use runar::prelude::*;
+
+#[runar::contract]
+struct P2PKH {
+    #[readonly]
+    pub_key_hash: Ripemd160,
+}
+```
+
+For stateful contracts, the struct includes a marker indicating it extends `StatefulSmartContract`:
+
+```rust
+#[runar::contract(stateful)]
+struct Counter {
+    count: i64,
+}
+```
+
+The `stateful` argument tells the compiler to inject preimage verification and state continuation logic.
+
+### Method Definition
+
+The `#[runar::methods]` macro is applied to the `impl` block. Public entry points are marked with `#[public]`:
+
+```rust
+#[runar::methods]
+impl P2PKH {
+    #[public]
+    fn unlock(&self, sig: Sig, pub_key: PubKey) {
+        assert!(hash160(&pub_key) == self.pub_key_hash);
+        assert!(check_sig(&sig, &pub_key));
+    }
+}
+```
+
+Methods without `#[public]` are private helpers that get inlined at their call sites during compilation.
+
+## Stateless Contracts
+
+A stateless contract has only `#[readonly]` fields and uses `#[runar::contract]` without the `stateful` argument.
+
+### P2PKH in Rust
+
+```rust
+use runar::prelude::*;
+
+#[runar::contract]
+struct P2PKH {
+    #[readonly]
+    pub_key_hash: Ripemd160,
+}
+
+#[runar::methods]
+impl P2PKH {
+    #[public]
+    fn unlock(&self, sig: Sig, pub_key: PubKey) {
+        assert!(hash160(&pub_key) == self.pub_key_hash);
+        assert!(check_sig(&sig, &pub_key));
+    }
+}
+```
+
+Key points:
+
+- **`&self` receiver** -- Public methods on stateless contracts take `&self` (immutable reference) because the contract state cannot change.
+- **`assert!()` macro** -- Rust's standard `assert!()` macro is used for assertions. The compiler maps it to Bitcoin Script's `OP_VERIFY` pattern.
+- **At least one `assert!()`** must appear in every public method.
+
+### Escrow in Rust
+
+```rust
+use runar::prelude::*;
+
+#[runar::contract]
+struct Escrow {
+    #[readonly]
+    buyer: PubKey,
+    #[readonly]
+    seller: PubKey,
+    #[readonly]
+    arbiter: PubKey,
+}
+
+#[runar::methods]
+impl Escrow {
+    #[public]
+    fn release(&self, seller_sig: Sig, buyer_sig: Sig) {
+        assert!(check_sig(&seller_sig, &self.seller));
+        assert!(check_sig(&buyer_sig, &self.buyer));
+    }
+
+    #[public]
+    fn refund(&self, buyer_sig: Sig, arbiter_sig: Sig) {
+        assert!(check_sig(&buyer_sig, &self.buyer));
+        assert!(check_sig(&arbiter_sig, &self.arbiter));
+    }
+
+    #[public]
+    fn arbitrate(&self, seller_sig: Sig, arbiter_sig: Sig) {
+        assert!(check_sig(&seller_sig, &self.seller));
+        assert!(check_sig(&arbiter_sig, &self.arbiter));
+    }
+}
+```
+
+## Stateful Contracts
+
+A stateful contract uses `#[runar::contract(stateful)]` and takes `&mut self` in its public methods. Mutable fields (without `#[readonly]`) represent on-chain state that changes with each transaction.
+
+### Counter in Rust
+
+```rust
+use runar::prelude::*;
+
+#[runar::contract(stateful)]
+struct Counter {
+    count: i64,
+}
+
+#[runar::methods]
+impl Counter {
+    #[public]
+    fn increment(&mut self) {
+        self.count += 1;
+        assert!(true);
+    }
+
+    #[public]
+    fn decrement(&mut self) {
+        assert!(self.count > 0);
+        self.count -= 1;
+        assert!(true);
+    }
+}
+```
+
+Note the `&mut self` receiver -- this signals to the compiler that the method modifies state and triggers the OP_PUSH_TX pattern for state continuation.
+
+### TicTacToe in Rust
+
+A more complete stateful example with both readonly and mutable fields, private helpers, and conditional logic:
+
+```rust
+use runar::prelude::*;
+
+#[runar::contract(stateful)]
+struct TicTacToe {
+    #[readonly]
+    alice: PubKey,
+    #[readonly]
+    bob: PubKey,
+    c0: i64,
+    c1: i64,
+    c2: i64,
+    c3: i64,
+    c4: i64,
+    c5: i64,
+    c6: i64,
+    c7: i64,
+    c8: i64,
+    is_alice_turn: bool,
+}
+
+#[runar::methods]
+impl TicTacToe {
+    #[public]
+    fn move_piece(&mut self, sig: Sig, pos: i64, player: i64) {
+        if self.is_alice_turn {
+            assert!(player == 1);
+            assert!(check_sig(&sig, &self.alice));
+        } else {
+            assert!(player == 2);
+            assert!(check_sig(&sig, &self.bob));
+        }
+
+        assert!(self.get_cell(pos) == 0);
+        self.set_cell(pos, player);
+        self.is_alice_turn = !self.is_alice_turn;
+
+        assert!(true);
+    }
+
+    fn get_cell(&self, pos: i64) -> i64 {
+        if pos == 0 { return self.c0; }
+        if pos == 1 { return self.c1; }
+        if pos == 2 { return self.c2; }
+        if pos == 3 { return self.c3; }
+        if pos == 4 { return self.c4; }
+        if pos == 5 { return self.c5; }
+        if pos == 6 { return self.c6; }
+        if pos == 7 { return self.c7; }
+        if pos == 8 { return self.c8; }
+        0
+    }
+
+    fn set_cell(&mut self, pos: i64, value: i64) {
+        if pos == 0 { self.c0 = value; }
+        if pos == 1 { self.c1 = value; }
+        if pos == 2 { self.c2 = value; }
+        if pos == 3 { self.c3 = value; }
+        if pos == 4 { self.c4 = value; }
+        if pos == 5 { self.c5 = value; }
+        if pos == 6 { self.c6 = value; }
+        if pos == 7 { self.c7 = value; }
+        if pos == 8 { self.c8 = value; }
+    }
+}
+```
+
+Methods without the `#[public]` attribute (`get_cell`, `set_cell`) are private helpers. They are inlined at each call site during compilation.
+
+## Types in Rust Contracts
+
+The `runar::prelude` provides all on-chain types. Rust's `i64` maps to `bigint` in the compiled output.
+
+| Rust Type | Equivalent TypeScript Type | Description |
+| --- | --- | --- |
+| `i64` | `bigint` | Integer values. The only numeric type allowed. |
+| `bool` | `boolean` | Boolean values. |
+| `ByteString` | `ByteString` | Variable-length byte sequence. |
+| `PubKey` | `PubKey` | 33-byte compressed public key. |
+| `Sig` | `Sig` | DER-encoded signature (affine type -- consumed exactly once). |
+| `Sha256` | `Sha256` | 32-byte SHA-256 digest. |
+| `Ripemd160` | `Ripemd160` | 20-byte RIPEMD-160 digest. |
+| `Addr` | `Addr` | 20-byte address. |
+| `SigHashPreimage` | `SigHashPreimage` | Transaction preimage (affine type). |
+| `Point` | `Point` | 64-byte elliptic curve point. |
+| `RabinSig` | `RabinSig` | Rabin signature. |
+| `RabinPubKey` | `RabinPubKey` | Rabin public key. |
+| `[T; N]` | `FixedArray<T, N>` | Fixed-size array. `N` must be a compile-time constant. |
+
+### Fixed Arrays
+
+Rust's native fixed-size array syntax is used:
+
+```rust
+#[runar::contract]
+struct MultiSig {
+    #[readonly]
+    signers: [PubKey; 3],
+}
+
+#[runar::methods]
+impl MultiSig {
+    #[public]
+    fn unlock(&self, sigs: [Sig; 2]) {
+        assert!(check_multi_sig(&sigs, &self.signers));
+    }
+}
+```
+
+Dynamic `Vec<T>` is not supported. All array sizes must be compile-time constants.
+
+### Affine Types
+
+`Sig` and `SigHashPreimage` are affine -- the compiler ensures each value is consumed exactly once:
+
+```rust
+// CORRECT: sig used once
+#[public]
+fn unlock(&self, sig: Sig, pub_key: PubKey) {
+    assert!(check_sig(&sig, &pub_key));
+}
+
+// COMPILE ERROR: sig used twice
+#[public]
+fn bad_unlock(&self, sig: Sig, pk1: PubKey, pk2: PubKey) {
+    assert!(check_sig(&sig, &pk1));   // first use
+    assert!(check_sig(&sig, &pk2));   // error: already consumed
+}
+```
+
+This aligns naturally with Rust's ownership model -- once a `Sig` is moved into a function call, it cannot be used again.
+
+## Built-in Functions
+
+All built-in functions are available directly through the prelude. They follow Rust's snake_case naming convention.
+
+### Cryptographic Functions
+
+```rust
+check_sig(&sig, &pub_key)
+check_multi_sig(&sigs, &pub_keys)
+hash256(&data)
+hash160(&data)
+sha256(&data)
+ripemd160(&data)
+check_preimage(&preimage)
+```
+
+### Byte Operations
+
+```rust
+len(&data)
+cat(&a, &b)
+substr(&data, start, length)
+left(&data, length)
+right(&data, length)
+split(&data, position)     // returns a tuple (ByteString, ByteString)
+reverse_bytes(&data)
+to_byte_string(&value)
+```
+
+### Conversion Functions
+
+```rust
+num2bin(num, length)
+bin2num(&data)
+int2str(num, byte_len)
+```
+
+### Math Functions
+
+```rust
+abs(x)
+min(a, b)
+max(a, b)
+within(x, low, high)
+safe_div(a, b)
+safe_mod(a, b)
+clamp(x, low, high)
+pow(base, exp)
+sqrt(x)
+gcd(a, b)
+divmod(a, b)          // returns (quotient, remainder)
+```
+
+### Control Functions
+
+```rust
+assert!(condition);    // Rust's built-in macro
+```
+
+## Attribute Reference
+
+| Attribute | Target | Description |
+| --- | --- | --- |
+| `#[runar::contract]` | `struct` | Marks the struct as a stateless contract. |
+| `#[runar::contract(stateful)]` | `struct` | Marks the struct as a stateful contract. |
+| `#[runar::methods]` | `impl` | Marks the implementation block as containing contract methods. |
+| `#[readonly]` | Field | Field is immutable, baked into the locking script. |
+| `#[public]` | Method | Method is a public entry point (spending condition). |
+
+## Control Flow
+
+### For Loops
+
+Only `for` loops with compile-time constant bounds are allowed:
+
+```rust
+let mut sum: i64 = 0;
+for i in 0..10 {
+    sum += balances[i];
+}
+```
+
+The `0..10` range is unrolled at compile time, producing 10 copies of the loop body.
+
+### Conditionals
+
+Standard `if`/`else` and `match` expressions work:
+
+```rust
+if amount > threshold {
+    self.balance -= amount;
+} else {
+    assert!(false);
+}
+
+match pos {
+    0 => self.c0 = value,
+    1 => self.c1 = value,
+    2 => self.c2 = value,
+    _ => assert!(false),
+}
+```
+
+### Disallowed Rust Features
+
+The following Rust features are not available in contracts:
+
+- `async`/`await`
+- Closures
+- Trait objects (`dyn Trait`)
+- `Box`, `Rc`, `Arc`, `RefCell` (heap allocation)
+- `Vec`, `HashMap`, `BTreeMap` (dynamic collections)
+- `String` (use `ByteString`)
+- Pattern matching on non-literal values
+- `loop` (unbounded)
+- `while` loops
+- Recursion
+- External crate imports (only `runar` is allowed)
+- Multiple structs per file
+- Enums (as contract types)
+- Generics on contracts (generic functions are not supported)
+- `unsafe` blocks
+- `impl Trait` return types
+- Lifetime annotations (managed automatically by the compiler)
+
+## Compiling Rust Contracts
+
+```bash
+runar compile contracts/p2pkh.runar.rs --output ./artifacts
+```
+
+The compiler invokes the `runar-rs` frontend to parse the Rust source via the procedural macros, translates it to the shared IR, and produces the standard JSON artifact.
+
+To compile all Rust contracts:
+
+```bash
+runar compile contracts/*.runar.rs --output ./artifacts
+```
+
+## Testing Rust Contracts
+
+Rust contracts are tested using native Rust tests. You instantiate the contract struct directly and call its methods, then use standard Rust assertions. A separate `runar::compile_check` function validates that the contract source compiles correctly.
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_increment() {
+        let mut c = Counter { count: 0 };
+        c.increment();
+        assert_eq!(c.count, 1);
+    }
+
+    #[test]
+    fn test_compile() {
+        runar::compile_check(include_str!("Counter.runar.rs"), "Counter.runar.rs").unwrap();
+    }
+}
+```
+
+You can also run tests via the Runar CLI:
+
+```bash
+runar test
+```
+
+## Next Steps
+
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Python Contracts](/docs/en/writing-contracts/python-contracts) -- Write contracts in Python
+- [Language Feature Matrix](/docs/en/writing-contracts/language-feature-matrix) -- Compare all six languages

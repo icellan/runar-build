@@ -1,0 +1,24 @@
+---
+import BaseLayout from '@layouts/BaseLayout.astro';
+import Button from '@components/shared/Button.astro';
+---
+
+<BaseLayout title="404 — Page Not Found">
+  <main class="min-h-screen flex items-center justify-center px-4">
+    <div class="text-center max-w-md">
+      <p class="font-mono text-6xl font-bold text-accent-500 mb-4">404</p>
+      <h1 class="text-2xl font-semibold mb-3">Page not found</h1>
+      <p class="text-text-secondary mb-8">
+        The page you're looking for doesn't exist or has been moved.
+      </p>
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-3">
+        <Button href="/" size="md">
+          Home
+        </Button>
+        <Button href="/docs/getting-started/overview" variant="secondary" size="md">
+          Documentation
+        </Button>
+      </div>
+    </div>
+  </main>
+</BaseLayout>

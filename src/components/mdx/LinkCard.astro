@@ -1,0 +1,19 @@
+---
+interface Props {
+  title: string;
+  description?: string;
+  href: string;
+}
+
+const { title, description, href } = Astro.props;
+---
+
+<a href={href} class="group block my-4 p-4 rounded-lg border border-border bg-surface hover:border-accent-500/30 transition-all duration-200 no-underline">
+  <div class="flex items-center justify-between">
+    <span class="font-semibold text-sm text-text group-hover:text-accent-500 transition-colors">{title}</span>
+    <svg class="w-4 h-4 text-text-tertiary group-hover:text-accent-500 group-hover:translate-x-0.5 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  </div>
+  {description && <p class="text-xs text-text-secondary mt-1">{description}</p>}
+</a>

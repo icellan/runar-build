@@ -1,0 +1,68 @@
+---
+import Logo from './Logo.astro';
+
+const currentYear = new Date().getFullYear();
+
+const columns = [
+  {
+    title: 'Product',
+    links: [
+      { label: 'Documentation', href: '/docs/getting-started/overview' },
+      { label: 'Examples', href: '/docs/examples/gallery' },
+      { label: 'API Reference', href: '/docs/api-reference/compiler-api' },
+    ],
+  },
+  {
+    title: 'Resources',
+    links: [
+      { label: 'Tutorials', href: '/docs/tutorials/hello-world' },
+      { label: 'Getting Started', href: '/docs/getting-started/overview' },
+      { label: 'GitHub', href: 'https://github.com/icellan/runar' },
+    ],
+  },
+];
+---
+
+<footer class="border-t border-border bg-bg">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+      <!-- Brand -->
+      <div>
+        <Logo class="mb-3" />
+        <p class="text-text-tertiary text-sm max-w-xs">
+          Write Bitcoin smart contracts in languages you already know. Compile to Bitcoin Script. Deploy to BSV.
+        </p>
+      </div>
+
+      <!-- Nav columns -->
+      {columns.map(col => (
+        <div>
+          <h3 class="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-3">{col.title}</h3>
+          <ul class="space-y-2">
+            {col.links.map(link => (
+              <li>
+                <a
+                  href={link.href}
+                  class="text-sm text-text-secondary hover:text-text transition-colors"
+                  {...(link.href.startsWith('http') ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+                >
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+
+    <!-- Bottom bar -->
+    <div class="mt-12 pt-6 border-t border-border flex flex-col sm:flex-row items-center justify-between gap-4">
+      <p class="text-xs text-text-tertiary">
+        &copy; {currentYear} Rúnar contributors. Open source under MIT.
+      </p>
+      <a href="#top" class="text-xs text-text-tertiary hover:text-text transition-colors">
+        Back to top &uarr;
+      </a>
+    </div>
+  </div>
+</footer>

@@ -1,0 +1,48 @@
+---
+import SectionLabel from './SectionLabel.astro';
+
+const entries = [
+  {
+    title: 'Getting Started',
+    description: 'Install Rúnar and deploy your first contract in minutes.',
+    href: '/docs/getting-started/overview',
+  },
+  {
+    title: 'Tutorials',
+    description: 'Step-by-step guides from Hello World to multi-party escrow.',
+    href: '/docs/tutorials/hello-world',
+  },
+  {
+    title: 'API Reference',
+    description: 'Complete reference for the compiler, SDK, and CLI.',
+    href: '/docs/api-reference/compiler-api',
+  },
+  {
+    title: 'Examples',
+    description: 'Fully worked examples you can clone and run.',
+    href: '/docs/examples/gallery',
+  },
+];
+---
+
+<section class="py-24 px-4">
+  <div class="max-w-6xl mx-auto">
+    <SectionLabel number="06" title="Explore the Docs" />
+    <div class="grid sm:grid-cols-2 gap-4">
+      {entries.map(entry => (
+        <a
+          href={entry.href}
+          class="group p-6 rounded-xl bg-surface border border-border hover:border-accent-500/30 transition-all duration-200 flex flex-col"
+        >
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="font-semibold group-hover:text-accent-500 transition-colors">{entry.title}</h3>
+            <svg class="w-4 h-4 text-text-tertiary group-hover:text-accent-500 group-hover:translate-x-0.5 transition-all" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </div>
+          <p class="text-sm text-text-secondary">{entry.description}</p>
+        </a>
+      ))}
+    </div>
+  </div>
+</section>

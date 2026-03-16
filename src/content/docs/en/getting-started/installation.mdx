@@ -1,0 +1,156 @@
+---
+title: "Installation"
+description: "Install the Rúnar compiler and SDK in your project."
+section: "getting-started"
+order: 20
+lang: "en"
+---
+
+This guide walks you through installing the Rúnar compiler and CLI, setting up your environment, and scaffolding your first project.
+
+## Prerequisites
+
+### Required
+
+- **Node.js >= 20** -- Rúnar's compiler and CLI run on Node.js. Download from [nodejs.org](https://nodejs.org/) or use a version manager like `nvm` or `fnm`.
+- **pnpm 9.15+** -- Rúnar uses pnpm for package management. If you do not have pnpm installed, enable it via Node.js corepack:
+
+```bash
+corepack enable
+corepack prepare pnpm@latest --activate
+```
+
+Verify your versions:
+
+```bash
+node --version   # Should print v20.x.x or higher
+pnpm --version   # Should print 9.15.x or higher
+```
+
+### Optional (Language Frontends)
+
+You only need these if you plan to write contracts in the corresponding language. TypeScript contracts work with just Node.js and pnpm.
+
+- **Go 1.26+** -- Only required if using the native Go compiler. The TypeScript compiler can compile `.runar.go` files without Go installed. Install from [go.dev](https://go.dev/dl/).
+- **Rust (latest stable)** -- Only required if using the native Rust compiler. Install via [rustup](https://rustup.rs/).
+- **Python 3.10+** -- Only required if using the native Python compiler. Install from [python.org](https://www.python.org/downloads/) or your system package manager.
+
+## Installation
+
+### Install the CLI globally
+
+The recommended approach is to install the Rúnar CLI globally so the `runar` command is available everywhere:
+
+```bash
+pnpm add -g runar-cli
+```
+
+### Or install per-project
+
+If you prefer project-local installations, you can add Rúnar as a dev dependency:
+
+```bash
+pnpm add -D runar-cli runar-lang
+```
+
+Then run commands via `pnpm exec runar` or add scripts to your `package.json`.
+
+## Verify Installation
+
+```bash
+runar --version
+```
+
+You should see output like:
+
+```
+0.1.0
+```
+
+If you installed per-project, use `pnpm exec runar --version` instead.
+
+## Scaffold a New Project
+
+The fastest way to get started is to use `runar init` to scaffold a new project:
+
+```bash
+runar init my-first-contract
+cd my-first-contract
+```
+
+This creates a ready-to-use project with the following:
+
+- A `src/contracts/` directory with an example `.runar.ts` contract
+- A `tests/` directory with a matching test file
+- A `package.json` with Rúnar dependencies pre-configured
+- A `tsconfig.json` configured for contract development
+
+Install the project dependencies:
+
+```bash
+pnpm install
+```
+
+## Available CLI Commands
+
+Once installed, the `runar` command provides everything you need for the full contract development lifecycle:
+
+| Command | Description |
+| ------- | ----------- |
+| `runar init [project-name]` | Scaffold a new Rúnar project |
+| `runar compile <files...>` | Compile contracts to JSON artifacts |
+| `runar test` | Run the test suite using vitest |
+| `runar deploy <artifact>` | Deploy a compiled contract to the network |
+| `runar verify <txid>` | Verify a deployed contract matches an artifact |
+| `runar codegen <artifacts...>` | Generate typed wrappers from artifacts |
+| `runar debug <artifact>` | Interactive step-through script debugger |
+
+Run `runar --help` or `runar <command> --help` for full usage details and flags.
+
+### Compile options
+
+```bash
+runar compile src/contracts/P2PKH.runar.ts --output ./artifacts
+runar compile src/contracts/*.runar.ts --ir      # Include IR in output
+runar compile src/contracts/*.runar.ts --asm     # Include ASM in output
+```
+
+### Deploy options
+
+```bash
+runar deploy ./artifacts/P2PKH.json \
+  --network testnet \
+  --key <your-WIF-private-key> \
+  --satoshis 10000
+```
+
+### Verify a deployment
+
+```bash
+runar verify <txid> --artifact ./artifacts/P2PKH.json --network testnet
+```
+
+### Generate typed wrappers
+
+```bash
+runar codegen ./artifacts/P2PKH.json --output ./src/contracts --lang ts
+```
+
+## Editor Setup
+
+Because Rúnar contracts are written in standard programming languages, your existing editor and IDE setup works out of the box. No special extensions or plugins are required.
+
+- **TypeScript contracts** (`.runar.ts`) -- Any editor with TypeScript support (VS Code, WebStorm, Neovim with LSP) provides full autocomplete, type checking, and error highlighting.
+- **Go contracts** (`.runar.go`) -- The standard Go extension or `gopls` language server works as expected.
+- **Rust contracts** (`.runar.rs`) -- `rust-analyzer` provides full IDE support.
+- **Python contracts** (`.runar.py`) -- Pylance, Pyright, or any Python language server works.
+
+The `.runar.*` file extensions are recognized by the Rúnar compiler but are otherwise standard source files in their respective languages. Your editor will provide syntax highlighting, code navigation, and refactoring support without any additional configuration.
+
+### TypeScript configuration tip
+
+If your editor shows import errors for `runar-lang` types, make sure you have run `pnpm install` in your project and that your `tsconfig.json` includes the Rúnar type definitions. Projects scaffolded with `runar init` have this configured automatically.
+
+## Next Steps
+
+Now that Rúnar is installed, head to the [Quick Start](/docs/en/getting-started/quick-start) guide to write, compile, test, and deploy your first contract.

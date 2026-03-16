@@ -1,0 +1,230 @@
+---
+title: "Quick Start"
+description: "Deploy your first contract in 5 minutes."
+section: "getting-started"
+order: 30
+lang: "en"
+---
+
+This guide walks you through the full Rúnar workflow -- from creating a project to deploying a contract on BSV. You will build a Pay-to-Public-Key-Hash (P2PKH) contract, the most fundamental Bitcoin spending condition, and take it all the way from source code to a live transaction.
+
+## Prerequisites
+
+Before starting, make sure you have:
+
+- Rúnar CLI installed (see [Installation](/docs/en/getting-started/installation))
+- Node.js >= 20 and pnpm 9.15+
+- A BSV testnet wallet with some test coins (for the deployment step)
+
+## Step 1: Create a New Project
+
+Scaffold a new project using the CLI:
+
+```bash
+runar init my-first-contract
+cd my-first-contract
+pnpm install
+```
+
+This creates a project with the standard Rúnar directory layout. You will see a `src/contracts/` directory, a `tests/` directory, and pre-configured `package.json` and `tsconfig.json` files.
+
+## Step 2: Write the Contract
+
+Create a new file at `src/contracts/P2PKH.runar.ts`. This contract implements Pay-to-Public-Key-Hash -- the standard Bitcoin pattern where funds can only be spent by someone who proves they own the private key corresponding to a given public key hash.
+
+```typescript
+import {
+  SmartContract,
+  assert,
+  PubKey,
+  Sig,
+  Addr,
+  hash160,
+  checkSig,
+} from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  constructor(pubKeyHash: Addr) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey) {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+
+export { P2PKH };
+```
+
+Let's break down what's happening:
+
+- **`extends SmartContract`** -- This is a stateless contract. The `pubKeyHash` property is `readonly` and gets baked into the locking script at deployment.
+- **`constructor`** -- Takes the public key hash as a parameter. The `super()` call registers it as a constructor argument so the compiler knows to embed it in the script.
+- **`public unlock()`** -- This is the contract's public method. It defines the spending condition: the caller must provide a valid signature and the public key that hashes to the stored `pubKeyHash`.
+- **`assert(hash160(pubKey) === this.pubKeyHash)`** -- Verifies the provided public key matches the expected hash.
+- **`assert(checkSig(sig, pubKey))`** -- Verifies the signature was produced by the private key corresponding to the public key.
+
+## Step 3: Compile the Contract
+
+Compile the contract to a JSON artifact:
+
+```bash
+runar compile src/contracts/P2PKH.runar.ts --output ./artifacts --asm
+```
+
+This produces `artifacts/P2PKH.json`. The `--asm` flag includes the human-readable assembly in the output, which is useful for learning and debugging.
+
+### Understanding the Artifact
+
+The compiled artifact is a JSON file containing everything needed to deploy and interact with the contract:
+
+```json
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "P2PKH",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "pubKeyHash", "type": "Addr" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "unlock",
+        "params": [
+          { "name": "sig", "type": "Sig" },
+          { "name": "pubKey", "type": "PubKey" }
+        ]
+      }
+    ]
+  },
+  "script": "76a91488ac",
+  "asm": "OP_DUP OP_HASH160 OP_EQUALVERIFY OP_CHECKSIG",
+  "constructorSlots": [
+    { "paramIndex": 0, "byteOffset": 3 }
+  ],
+  "sourceMap": { ... },
+  "buildTimestamp": "2026-03-15T10:30:00Z"
+}
+```
+
+The `script` field contains the hex-encoded Bitcoin Script. Constructor arguments are filled in at deploy time via the `constructorSlots` array, which specifies the `paramIndex` and `byteOffset` for each placeholder. The `abi` describes the contract's interface so the SDK and codegen tools know how to construct transactions.
+
+## Step 4: Write a Test
+
+Create a test file at `tests/P2PKH.test.ts`. Rúnar uses vitest under the hood, and provides the `TestContract` utility for local contract execution without needing a network. `TestContract.fromSource` takes a source string and an initial state object, then lets you call contract methods and inspect the results.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { TestContract } from 'runar-testing';
+import { readFileSync } from 'node:fs';
+
+const source = readFileSync('./src/contracts/P2PKH.runar.ts', 'utf8');
+
+describe('P2PKH', () => {
+  it('should unlock with correct key pair', () => {
+    const contract = TestContract.fromSource(source, {
+      pubKeyHash: 'ab'.repeat(10),
+    });
+
+    const result = contract.call('unlock', {
+      sig: '30' + 'aa'.repeat(35),
+      pubKey: '02' + 'bb'.repeat(32),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should fail with wrong public key hash', () => {
+    const contract = TestContract.fromSource(source, {
+      pubKeyHash: 'ab'.repeat(10),
+    });
+
+    const result = contract.call('unlock', {
+      sig: '30' + 'aa'.repeat(35),
+      pubKey: '02' + 'cc'.repeat(32),
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+## Step 5: Run the Tests
+
+Run the test suite:
+
+```bash
+runar test
+```
+
+This executes your tests using vitest. You should see output like:
+
+```
+ ✓ tests/P2PKH.test.ts (2 tests) 48ms
+   ✓ P2PKH > should unlock with correct key pair
+   ✓ P2PKH > should fail with wrong key pair
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Duration  312ms
+```
+
+The tests run locally -- no BSV node or network connection is required. The `TestContract` utility compiles the contract on the fly and executes the Bitcoin Script in a local interpreter.
+
+## Step 6: Deploy to Testnet
+
+Once your tests pass, deploy the contract to the BSV testnet:
+
+```bash
+runar deploy ./artifacts/P2PKH.json \
+  --network testnet \
+  --key <your-WIF-private-key> \
+  --satoshis 10000
+```
+
+Replace `<your-WIF-private-key>` with a WIF-format private key that has testnet coins. The `--satoshis` flag specifies how many satoshis to lock in the contract output.
+
+On success, you will see:
+
+```
+Contract deployed successfully.
+  Network:  testnet
+  TxID:     a1b2c3d4e5f6...
+  Output:   0
+  Satoshis: 10000
+  Script:   76a914...88ac
+```
+
+## Step 7: Verify the Deployment
+
+Confirm that the deployed transaction matches your compiled artifact:
+
+```bash
+runar verify a1b2c3d4e5f6... \
+  --artifact ./artifacts/P2PKH.json \
+  --network testnet
+```
+
+This fetches the transaction from the network and compares the on-chain locking script against the artifact. A successful verification confirms the contract was deployed correctly and has not been tampered with.
+
+```
+Verification passed.
+  Contract:  P2PKH
+  TxID:      a1b2c3d4e5f6...
+  Script match: ✓
+```
+
+## What's Next
+
+You have now completed the full Rúnar workflow: write, compile, test, deploy, and verify. From here:
+
+- [Project Structure](/docs/en/getting-started/project-structure) -- Understand the full project layout and artifact format
+- [Contract Basics](/docs/en/writing-contracts/contract-basics) -- Learn about data types, methods, and the contract lifecycle
+- [Writing Tests](/docs/en/testing-and-debugging/writing-tests) -- Advanced testing patterns and utilities
+- [StatefulSmartContract](/docs/en/sdk/overview) -- Build contracts that maintain state across transactions

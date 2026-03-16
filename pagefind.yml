@@ -1,0 +1,8 @@
+site: dist
+glob: "docs/**/*.html"
+root_selector: "[data-pagefind-body]"
+exclude_selectors:
+  - "nav"
+  - "footer"
+  - "[data-pagefind-ignore]"
+force_language: "en"

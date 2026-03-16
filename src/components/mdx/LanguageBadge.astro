@@ -1,0 +1,29 @@
+---
+interface Props {
+  lang: 'typescript' | 'go' | 'rust' | 'python' | 'solidity' | 'move';
+}
+
+const { lang } = Astro.props;
+
+const colors: Record<string, string> = {
+  typescript: 'bg-[#3178c6]/10 text-[#3178c6]',
+  go: 'bg-[#00add8]/10 text-[#00add8]',
+  rust: 'bg-[#dea584]/10 text-[#dea584]',
+  python: 'bg-[#3776ab]/10 text-[#3776ab]',
+  solidity: 'bg-[#636890]/10 text-[#636890]',
+  move: 'bg-[#4a90d9]/10 text-[#4a90d9]',
+};
+
+const labels: Record<string, string> = {
+  typescript: 'TypeScript',
+  go: 'Go',
+  rust: 'Rust',
+  python: 'Python',
+  solidity: 'Solidity',
+  move: 'Move',
+};
+---
+
+<span class:list={['inline-block text-xs font-mono px-2 py-0.5 rounded-full', colors[lang] || 'bg-surface text-text-secondary']}>
+  {labels[lang] || lang}
+</span>
