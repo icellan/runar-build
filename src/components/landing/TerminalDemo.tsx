@@ -3,14 +3,18 @@ import { useState, useEffect, useRef } from 'react';
 const lines = [
   { text: '$ npx runar compile Counter.ts', delay: 0 },
   { text: '', delay: 400 },
-  { text: '  ✓ Parsed Counter.ts', delay: 600 },
-  { text: '  ✓ Type-checked 2 methods', delay: 800 },
-  { text: '  ✓ Emitted Bitcoin Script (142 bytes)', delay: 1000 },
-  { text: '', delay: 1200 },
-  { text: '$ npx runar deploy --network mainnet', delay: 1600 },
-  { text: '', delay: 2000 },
-  { text: '  ✓ Deployed to txid: a1b2c3d4...', delay: 2200 },
-  { text: '  ✓ Contract ready at output #0', delay: 2400 },
+  { text: '  Compiling: Counter.ts', delay: 600 },
+  { text: '  Artifact written: artifacts/Counter.json', delay: 800 },
+  { text: '', delay: 1000 },
+  { text: '  Compilation complete: 1 succeeded, 0 failed', delay: 1200 },
+  { text: '', delay: 1600 },
+  { text: '$ npx runar deploy artifacts/Counter.json --network mainnet', delay: 2000 },
+  { text: '', delay: 2400 },
+  { text: '  Deploying contract: Counter', delay: 2600 },
+  { text: '  Broadcasting...', delay: 2800 },
+  { text: '', delay: 3000 },
+  { text: '  Deployment successful!', delay: 3200 },
+  { text: '  TXID: a1b2c3d4e5f6...', delay: 3400 },
 ];
 
 export default function TerminalDemo() {

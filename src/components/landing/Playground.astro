@@ -1,0 +1,101 @@
+---
+import SectionLabel from './SectionLabel.astro';
+---
+
+<section class="py-24 px-4">
+  <div class="max-w-6xl mx-auto">
+    <SectionLabel number="06" title="Try It Now" />
+    <div class="flex flex-col lg:flex-row gap-8 items-start">
+      <div class="flex-1 max-w-xl">
+        <h3 class="text-2xl font-semibold mb-4">Rúnar Playground</h3>
+        <p class="text-text-secondary text-lg mb-6">
+          Write, compile, and debug contracts directly in your browser. No installation required.
+        </p>
+        <ul class="space-y-3 text-sm text-text-secondary mb-8">
+          <li class="flex items-start gap-3">
+            <span class="text-accent-500 mt-0.5 shrink-0">&check;</span>
+            <span>Monaco editor with all six languages and auto-completion</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-accent-500 mt-0.5 shrink-0">&check;</span>
+            <span>In-browser compilation &mdash; no backend, everything runs in Web Workers</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-accent-500 mt-0.5 shrink-0">&check;</span>
+            <span>Full pipeline visualization: AST, ANF IR, Script (ASM / Hex / Annotated)</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-accent-500 mt-0.5 shrink-0">&check;</span>
+            <span>Step-through Bitcoin Script debugger with real ECDSA signatures</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-accent-500 mt-0.5 shrink-0">&check;</span>
+            <span>Stack and alt-stack inspection at every opcode</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-accent-500 mt-0.5 shrink-0">&check;</span>
+            <span>Stateful contract execution with checkPreimage support</span>
+          </li>
+          <li class="flex items-start gap-3">
+            <span class="text-accent-500 mt-0.5 shrink-0">&check;</span>
+            <span>Ready-to-run example contracts with auto-generated arguments</span>
+          </li>
+        </ul>
+        <a
+          href="https://runar.run"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-2 px-5 py-2.5 bg-accent-500 text-neutral-950 font-semibold text-sm rounded-lg hover:bg-accent-400 transition-colors"
+        >
+          Open Playground
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+            <polyline points="15 3 21 3 21 9" />
+            <line x1="10" y1="14" x2="21" y2="3" />
+          </svg>
+        </a>
+      </div>
+      <div class="flex-1 w-full lg:max-w-lg">
+        <div class="rounded-xl border border-border bg-surface overflow-hidden shadow-lg">
+          <!-- Mock playground window -->
+          <div class="flex items-center gap-2 px-4 py-3 border-b border-border">
+            <div class="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
+            <div class="w-3 h-3 rounded-full bg-[#febc2e]"></div>
+            <div class="w-3 h-3 rounded-full bg-[#28c840]"></div>
+            <span class="ml-2 text-xs font-mono text-text-tertiary">runar.run</span>
+          </div>
+          <div class="flex divide-x divide-border text-xs font-mono">
+            <!-- Editor side -->
+            <div class="flex-1 p-4 bg-bg">
+              <div class="text-text-tertiary mb-2 text-[10px] uppercase tracking-wider">Editor</div>
+              <pre class="text-[11px] leading-relaxed"><code><span class="text-text-tertiary">class</span> <span class="text-accent-400">Counter</span> <span class="text-text-tertiary">extends</span> <span class="text-accent-400">StatefulSmartContract</span> <span class="text-text-tertiary">{'{'}</span>
+  <span class="text-text-secondary">count</span><span class="text-text-tertiary">:</span> <span class="text-info">bigint</span>
+
+  <span class="text-text-tertiary">public</span> <span class="text-accent-400">increment</span><span class="text-text-tertiary">() {'{'}</span>
+    <span class="text-text-secondary">this</span><span class="text-text-tertiary">.count++</span>
+  <span class="text-text-tertiary">{'}'}</span>
+<span class="text-text-tertiary">{'}'}</span></code></pre>
+            </div>
+            <!-- Debugger side -->
+            <div class="flex-1 p-4 bg-bg">
+              <div class="text-text-tertiary mb-2 text-[10px] uppercase tracking-wider">Debugger</div>
+              <div class="space-y-1 text-[11px]">
+                <div class="text-text-tertiary">OP_DUP</div>
+                <div class="text-text-tertiary">OP_HASH160</div>
+                <div class="text-accent-400 bg-accent-500/10 px-1 rounded">&rsaquo; OP_EQUALVERIFY</div>
+                <div class="text-text-tertiary">OP_CHECKSIG</div>
+              </div>
+              <div class="mt-3 pt-2 border-t border-border">
+                <div class="text-text-tertiary text-[10px] uppercase tracking-wider mb-1">Stack</div>
+                <div class="space-y-0.5 text-[11px]">
+                  <div class="text-success font-mono">01</div>
+                  <div class="text-text-secondary font-mono">a1b2c3d4...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

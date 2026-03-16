@@ -3,53 +3,54 @@ import { useState } from 'react';
 const steps = [
   {
     label: '1. Write',
-    code: `import { contract, state, method } from 'runar';
+    code: `import { StatefulSmartContract, assert } from 'runar-lang';
 
-@contract
-class Counter {
-  @state count: bigint = 0n;
+class Counter extends StatefulSmartContract {
+  count: bigint;
 
-  @method
-  increment() {
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public increment() {
     this.count++;
   }
 
-  @method
-  getCount(): bigint {
-    return this.count;
+  public decrement() {
+    assert(this.count > 0n);
+    this.count--;
   }
 }`,
     lang: 'TypeScript',
   },
   {
     label: '2. Compile',
-    code: `$ npx runar compile
+    code: `$ npx runar compile Counter.ts
 
-  ✓ Parsed Counter.ts
-  ✓ Type-checked 2 methods
-  ✓ Generated AST
-  ✓ Optimized IR
-  ✓ Emitted Bitcoin Script
+  Compiling: Counter.ts
+  Artifact written: artifacts/Counter.json
 
-  Output: dist/Counter.script
-  Size:   142 bytes
-  Time:   23ms`,
+  Compilation complete: 1 succeeded, 0 failed`,
     lang: 'Terminal',
   },
   {
     label: '3. Deploy',
-    code: `import { RunarSDK } from 'runar/sdk';
-import { Counter } from './dist/Counter';
+    code: `import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import artifact from './artifacts/Counter.json';
 
-const sdk = new RunarSDK({ network: 'mainnet' });
-const counter = await sdk.deploy(Counter);
+const provider = new WhatsOnChainProvider('mainnet');
+const signer = new LocalSigner(privateKeyHex);
+const contract = new RunarContract(artifact, [0n]);
 
-console.log('Deployed:', counter.txid);
+const { txid } = await contract.deploy(provider, signer, {
+  satoshis: 10000,
+});
 
-// Call the contract
-await counter.increment();
-const count = await counter.getCount();
-console.log('Count:', count); // 1n`,
+console.log('Deployed:', txid);
+
+// Call a method
+await contract.call('increment', [], provider, signer);`,
     lang: 'TypeScript',
   },
 ];

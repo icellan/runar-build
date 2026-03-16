@@ -13,7 +13,7 @@ export const features: Feature[] = [
     description: 'Deploy and call contracts with full type inference. Catch errors at compile time, not on-chain.',
   },
   {
-    title: 'Inductive Contracts',
+    title: 'Stateful Contracts',
     description: 'Build stateful applications using UTXO-native state machines. No account model needed.',
   },
   {

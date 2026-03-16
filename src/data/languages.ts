@@ -10,12 +10,15 @@ export const languages: Language[] = [
     name: 'TypeScript',
     status: 'stable',
     lang: 'typescript',
-    snippet: `@contract
-class Counter {
-  @state count: bigint = 0n;
+    snippet: `class Counter extends StatefulSmartContract {
+  count: bigint;
 
-  @method
-  increment() {
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public increment() {
     this.count++;
   }
 }`,
@@ -25,7 +28,8 @@ class Counter {
     status: 'stable',
     lang: 'go',
     snippet: `type Counter struct {
-    Count int64 \`state\`
+    runar.StatefulSmartContract
+    Count runar.Bigint
 }
 
 func (c *Counter) Increment() {
@@ -36,13 +40,14 @@ func (c *Counter) Increment() {
     name: 'Rust',
     status: 'beta',
     lang: 'rust',
-    snippet: `#[contract]
-struct Counter {
-    #[state]
-    count: i64,
+    snippet: `#[runar::contract]
+pub struct Counter {
+    pub count: Bigint,
 }
 
+#[runar::methods(Counter)]
 impl Counter {
+    #[public]
     pub fn increment(&mut self) {
         self.count += 1;
     }
@@ -52,11 +57,14 @@ impl Counter {
     name: 'Python',
     status: 'stable',
     lang: 'python',
-    snippet: `@contract
-class Counter:
-    count: int = state(0)
+    snippet: `class Counter(StatefulSmartContract):
+    count: Bigint
 
-    @method
+    def __init__(self, count: Bigint):
+        super().__init__(count)
+        self.count = count
+
+    @public
     def increment(self):
         self.count += 1`,
   },
@@ -76,9 +84,9 @@ class Counter:
     name: 'Move',
     status: 'planned',
     lang: 'move',
-    snippet: `module counter {
-    struct Counter has key {
-        count: u64,
+    snippet: `module Counter {
+    resource struct Counter {
+        count: bigint,
     }
 
     public fun increment(c: &mut Counter) {
