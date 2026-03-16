@@ -233,73 +233,66 @@ Each move is a separate transaction on the BSV blockchain. The entire game histo
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('TicTacToe', () => {
-  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
-  const bobKey = bsv.PrivateKey.fromRandom('testnet');
-  const alicePub = aliceKey.toPublicKey().toString();
-  const bobPub = bobKey.toPublicKey().toString();
+  const source = readFileSync('./src/contracts/TicTacToe.runar.ts', 'utf-8');
 
-  it('should allow Alice to make the first move', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/TicTacToe.runar.ts',
-      'TicTacToe'
-    );
-    const instance = contract.create(alicePub, bobPub);
+  it('should allow Alice to make the first move', () => {
+    const contract = TestContract.fromSource(source, {
+      alice: ALICE.pubKey,
+      bob: BOB.pubKey,
+    });
 
-    const result = await instance.call('move', {
-      sig: instance.sign(aliceKey),
+    const result = contract.call('move', {
+      sig: ALICE.privKey,
       pos: 4n,
-      txPreimage: instance.getPreimage(),
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject Bob moving on Alice turn', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/TicTacToe.runar.ts',
-      'TicTacToe'
-    );
-    const instance = contract.create(alicePub, bobPub);
+  it('should reject Bob moving on Alice turn', () => {
+    const contract = TestContract.fromSource(source, {
+      alice: ALICE.pubKey,
+      bob: BOB.pubKey,
+    });
 
     // Bob tries to move first
-    const result = await instance.call('move', {
-      sig: instance.sign(bobKey),
+    const result = contract.call('move', {
+      sig: BOB.privKey,
       pos: 0n,
-      txPreimage: instance.getPreimage(),
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should allow both players to cancel', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/TicTacToe.runar.ts',
-      'TicTacToe'
-    );
-    const instance = contract.create(alicePub, bobPub);
+  it('should allow both players to cancel', () => {
+    const contract = TestContract.fromSource(source, {
+      alice: ALICE.pubKey,
+      bob: BOB.pubKey,
+    });
 
-    const result = await instance.call('cancel', {
-      aliceSig: instance.sign(aliceKey),
-      bobSig: instance.sign(bobKey),
+    const result = contract.call('cancel', {
+      aliceSig: ALICE.privKey,
+      bobSig: BOB.privKey,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject cancel with only one signature', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/TicTacToe.runar.ts',
-      'TicTacToe'
-    );
-    const instance = contract.create(alicePub, bobPub);
+  it('should reject cancel with only one signature', () => {
+    const contract = TestContract.fromSource(source, {
+      alice: ALICE.pubKey,
+      bob: BOB.pubKey,
+    });
 
-    const result = await instance.call('cancel', {
-      aliceSig: instance.sign(aliceKey),
-      bobSig: instance.sign(aliceKey),
+    const result = contract.call('cancel', {
+      aliceSig: ALICE.privKey,
+      bobSig: ALICE.privKey,
     });
 
     expect(result.success).toBe(false);

@@ -16,7 +16,7 @@ BSV transaction fees are calculated based on **transaction size in bytes**, not 
 fee = transactionSizeInBytes * feeRate
 ```
 
-As of early 2026, the standard fee rate on BSV mainnet is **0.5 satoshis per byte** (500 satoshis per kilobyte). This is extremely low compared to other blockchains -- a typical contract deployment transaction of 250 bytes costs approximately 125 satoshis (less than a fraction of a cent).
+As of early 2026, the standard fee rate on BSV mainnet is **0.1 satoshis per byte** (100 satoshis per kilobyte). This is extremely low compared to other blockchains -- a typical contract deployment transaction of 250 bytes costs approximately 25 satoshis (less than a fraction of a cent).
 
 ### What Contributes to Transaction Size
 
@@ -40,9 +40,9 @@ For deployment transactions, use `estimateDeployFee()` to calculate the expected
 ```typescript
 import { estimateDeployFee } from 'runar-sdk';
 
-const fee = estimateDeployFee(contract, 0.5); // feeRate = 0.5 sat/byte
+const fee = estimateDeployFee(1, contract.getLockingScript().length / 2); // 1 input, script byte length
 console.log('Estimated deploy fee:', fee, 'satoshis');
-// Estimated deploy fee: 125 satoshis
+// Estimated deploy fee: 250 satoshis
 ```
 
 The function estimates the transaction size by summing:
@@ -59,14 +59,10 @@ When calling a contract method, the fee depends on both the unlocking script (me
 
 ```typescript
 // The SDK estimates the fee automatically
-const result = await contract.call('unlock', {
-  sig: signer,
-  pubKey: signer.publicKey,
-}, {
-  outputs: [
-    { address: 'mxRecipient...', satoshis: 9500 },
-  ],
-});
+const result = await contract.call('unlock', [
+  null,                // sig (auto-sign)
+  signer.publicKey,
+], provider, signer);
 
 console.log('Actual fee paid:', result.fee);
 ```
@@ -85,7 +81,8 @@ import { selectUtxos } from 'runar-sdk';
 const allUtxos = await provider.getUtxos(signer.address);
 
 // Select UTXOs to cover 10000 satoshis (contract amount) + ~300 (estimated fee)
-const selected = selectUtxos(allUtxos, 10300);
+const lockingScriptByteLen = contract.getLockingScript().length / 2;
+const selected = selectUtxos(allUtxos, 10300, lockingScriptByteLen);
 
 console.log('Selected:', selected.length, 'UTXOs');
 console.log('Total value:', selected.reduce((sum, u) => sum + u.satoshis, 0));
@@ -137,8 +134,8 @@ change = totalInputValue - contractAmount - fee
 For example:
 - Selected UTXO: 50000 satoshis
 - Contract amount: 10000 satoshis
-- Fee: 125 satoshis
-- Change: 50000 - 10000 - 125 = **39875 satoshis**
+- Fee: 250 satoshis
+- Change: 50000 - 10000 - 250 = **39750 satoshis**
 
 ### Dust Threshold
 
@@ -147,7 +144,7 @@ BSV has a **dust threshold** of 546 satoshis. Outputs below this value are consi
 ```typescript
 // If change would be 400 satoshis (below dust threshold):
 // No change output is created
-// Effective fee becomes: 125 + 400 = 525 satoshis
+// Effective fee becomes: 250 + 400 = 650 satoshis
 ```
 
 This is rare in practice, but it can happen when the UTXO value closely matches the target.
@@ -198,11 +195,8 @@ await counter.deploy({ satoshis: initialSatoshis });
 **Option 2: Add funding inputs.** When the continuation output is getting low, add external funding to the call transaction:
 
 ```typescript
-const result = await counter.call('increment', {
-  preimage: 'auto',
-}, {
-  outputs: 'auto',
-  fundingUtxos: [
+const result = await counter.call('increment', [], provider, signer, {
+  additionalUtxos: [
     { txid: '...', outputIndex: 0, satoshis: 10000, script: '...' },
   ],
 });
@@ -220,14 +214,17 @@ import { buildDeployTransaction, selectUtxos } from 'runar-sdk';
 const utxos = await provider.getUtxos(signer.address);
 
 // Manually select UTXOs with extra headroom
-const selected = selectUtxos(utxos, 15000);
+const lockingScript = contract.getLockingScript();
+const selected = selectUtxos(utxos, 15000, lockingScript.length / 2);
 
-// Build transaction with explicit options
-const tx = buildDeployTransaction(contract, selected, {
-  satoshis: 10000,
-  changeAddress: 'mMyChange...',
-  feeRate: 0.5,
-});
+// Build transaction with explicit positional args
+const tx = buildDeployTransaction(
+  lockingScript,
+  selected,
+  10000,
+  'mMyChange...',
+  signer.changeScript,
+);
 
 // Inspect the fee before broadcasting
 const inputTotal = selected.reduce((s, u) => s + u.satoshis, 0);
@@ -239,20 +236,20 @@ console.log('Fee rate:', actualFee / tx.toHex().length * 2, 'sat/byte');
 
 ### Overriding Fee Rate
 
-The default fee rate is 0.5 satoshis per byte. You can override it:
+The default fee rate is 0.1 satoshis per byte (100 sats/KB). You can override it when using the low-level transaction building functions:
 
 ```typescript
+import { buildDeployTransaction } from 'runar-sdk';
+
 // Higher fee for faster confirmation during congestion
-const result = await contract.deploy({
-  satoshis: 10000,
-  feeRate: 1.0,
-});
+const tx = buildDeployTransaction(
+  lockingScript, selected, 10000, changeAddress, changeScript, 2.0,
+);
 
 // Lower fee (if your node accepts it)
-const result2 = await contract.deploy({
-  satoshis: 10000,
-  feeRate: 0.25,
-});
+const tx2 = buildDeployTransaction(
+  lockingScript, selected, 10000, changeAddress, changeScript, 0.5,
+);
 ```
 
 ## Optimizing Transaction Size and Cost
@@ -273,14 +270,14 @@ runar compile contracts/MyContract.runar.ts --enable-constant-folding
 
 ### Fee Comparison Table
 
-| Operation | Typical Size | Fee (at 0.5 sat/byte) |
-| --------- | ------------ | --------------------- |
-| Deploy P2PKH | ~250 bytes | ~125 sat |
-| Call P2PKH (unlock) | ~350 bytes | ~175 sat |
-| Deploy Counter (stateful) | ~400 bytes | ~200 sat |
-| Call Counter (increment) | ~450 bytes | ~225 sat |
-| Token transfer (split) | ~600 bytes | ~300 sat |
-| Token merge (2-to-1) | ~700 bytes | ~350 sat |
+| Operation | Typical Size | Fee (at 0.1 sat/byte) |
+| --------- | ------------ | -------------------- |
+| Deploy P2PKH | ~250 bytes | ~25 sat |
+| Call P2PKH (unlock) | ~350 bytes | ~35 sat |
+| Deploy Counter (stateful) | ~400 bytes | ~40 sat |
+| Call Counter (increment) | ~450 bytes | ~45 sat |
+| Token transfer (split) | ~600 bytes | ~60 sat |
+| Token merge (2-to-1) | ~700 bytes | ~70 sat |
 
 These are approximate. Actual sizes depend on the specific contract, number of state fields, and argument sizes.
 

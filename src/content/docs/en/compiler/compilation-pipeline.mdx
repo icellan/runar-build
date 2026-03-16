@@ -37,19 +37,16 @@ This contract has one constructor parameter (`pubKeyHash`), one public method (`
 **Input:** Source text in any supported language.
 **Output:** `ContractNode` AST.
 
-The parser reads source code and produces a language-neutral abstract syntax tree. The parser used depends on the source language -- ts-morph for TypeScript, tree-sitter for Go, SWC for Rust, and a recursive descent parser for Python -- but the output is always the same `ContractNode` structure.
+The parser reads source code and produces a language-neutral abstract syntax tree. The parser used depends on the source language -- ts-morph for TypeScript, hand-written recursive descent parsers for Solidity, Move, Go, and Rust, and a hand-written tokenizer with recursive descent for Python -- but the output is always the same `ContractNode` structure.
 
 For our P2PKH contract, the parser produces:
 
 ```json
 {
-  "type": "ContractNode",
+  "kind": "contract",
   "name": "P2PKH",
-  "base": "SmartContract",
-  "constructorParams": [
-    { "name": "pubKeyHash", "type": "Ripemd160" }
-  ],
-  "stateFields": [
+  "parentClass": "SmartContract",
+  "properties": [
     { "name": "pubKeyHash", "type": "Ripemd160", "readonly": true }
   ],
   "methods": [
@@ -62,30 +59,30 @@ For our P2PKH contract, the parser produces:
       ],
       "body": [
         {
-          "type": "AssertStatement",
+          "kind": "expression_statement",
           "expression": {
-            "type": "BinaryExpression",
+            "kind": "binary_expr",
             "operator": "===",
             "left": {
-              "type": "CallExpression",
+              "kind": "call_expr",
               "callee": "hash160",
-              "args": [{ "type": "Identifier", "name": "pubKey" }]
+              "args": [{ "kind": "identifier", "name": "pubKey" }]
             },
             "right": {
-              "type": "MemberExpression",
+              "kind": "member_expr",
               "object": "this",
               "property": "pubKeyHash"
             }
           }
         },
         {
-          "type": "AssertStatement",
+          "kind": "expression_statement",
           "expression": {
-            "type": "CallExpression",
+            "kind": "call_expr",
             "callee": "checkSig",
             "args": [
-              { "type": "Identifier", "name": "sig" },
-              { "type": "Identifier", "name": "pubKey" }
+              { "kind": "identifier", "name": "sig" },
+              { "kind": "identifier", "name": "pubKey" }
             ]
           }
         }
@@ -97,10 +94,10 @@ For our P2PKH contract, the parser produces:
 
 Key properties of the `ContractNode`:
 - All language-specific syntax is erased. There are no TypeScript-specific features like decorators or generics.
-- The base class (`SmartContract` vs `StatefulSmartContract`) is recorded so downstream passes know whether to inject statefulness machinery.
-- Constructor parameters and state fields are separated so the compiler knows which values are baked into the locking script.
+- The parent class (`SmartContract` vs `StatefulSmartContract`) is recorded so downstream passes know whether to inject statefulness machinery.
+- Constructor parameters and state fields are represented as `properties` so the compiler knows which values are baked into the locking script.
 
-You can stop the pipeline here using the `parseOnly` option or the `runar compile --parse-only` CLI flag.
+You can stop the pipeline here using the `parseOnly` compiler option.
 
 ## Pass 2: Validate (02-validate.ts)
 
@@ -132,7 +129,7 @@ P2PKH.runar.ts:12:5 - error RNR001: While loops are not allowed in Runar contrac
 
 Validation does not modify the AST. It either passes (allowing the pipeline to continue) or fails with diagnostics.
 
-You can stop the pipeline here using the `validateOnly` option.
+You can use the `validateOnly` compiler option to stop the pipeline here.
 
 ## Pass 3: Type-check (03-typecheck.ts)
 
@@ -156,7 +153,8 @@ Ripemd160  <:  ByteString
 Sha256     <:  ByteString
 PubKey     <:  ByteString
 Sig        <:  ByteString
-Rabin      <:  bigint
+RabinSig   <:  bigint
+RabinPubKey <:  bigint
 ```
 
 This means anywhere a `ByteString` is expected, you can pass a `Ripemd160`, `Sha256`, `PubKey`, or `Sig`. But the reverse is not true -- you cannot pass an arbitrary `ByteString` where a `PubKey` is expected.
@@ -170,7 +168,7 @@ P2PKH.runar.ts:15:5 - error RNR020: Affine type 'Sig' consumed more than once.
   First use at line 14, second use at line 15.
 ```
 
-You can stop the pipeline here using the `typecheckOnly` option.
+You can use the `typecheckOnly` compiler option to stop the pipeline here.
 
 ## Pass 4: ANF Lower (04-anf-lower.ts)
 
@@ -231,7 +229,7 @@ OP_SWAP                   // [pubKeyHash, pubKey, pubKey, sig]
 
 In practice, the stack lowering pass produces a sequence of `StackOp` instructions that each carry the opcode and a comment referencing the original ANF binding. The peephole optimizer then cleans up redundant stack manipulations.
 
-**Stack depth management.** The stack lowering pass tracks the current stack depth and enforces a maximum of 800 elements. When a value is buried too deep to reach efficiently with `OP_PICK` or `OP_ROLL`, the pass moves it to the alt-stack using `OP_TOALTSTACK` and retrieves it later with `OP_FROMALTSTACK`.
+**Stack depth management.** The compiler enforces a maximum stack depth of 800 elements and will emit an error if this limit is exceeded.
 
 **Stack position resolution.** Given the ANF `let t2 = checkSig(sig, pubKey)`, the stack lowerer knows that `sig` is at stack position 1 and `pubKey` is at position 0 (top of stack). It emits the minimal sequence of stack operations to arrange the arguments correctly for `OP_CHECKSIG`.
 
@@ -283,12 +281,10 @@ Three optimization passes can run during compilation:
 
 ### Peephole Optimizer (Stack IR)
 
-Runs after stack lowering, before emission. Applies 15 pattern-matching rules:
+Runs after stack lowering, before emission. Applies 29 pattern-matching rules:
 
 | Pattern | Replacement | Savings |
 | ------- | ----------- | ------- |
-| `OP_SWAP OP_DROP` | `OP_NIP` | 1 byte |
-| `OP_SWAP OP_OVER` | `OP_TUCK` | 1 byte |
 | `OP_0 OP_PICK` | `OP_DUP` | 2 bytes |
 | `OP_1 OP_ROLL` | `OP_SWAP` | 2 bytes |
 | `OP_DUP OP_DROP` | (removed) | 2 bytes |
@@ -301,7 +297,7 @@ Runs after ANF lowering, before stack lowering. Applies 12 algebraic simplificat
 
 ### Constant Folder (ANF IR)
 
-Disabled by default. When enabled, evaluates constant expressions at compile time. For example, `sha256(0x68656c6c6f)` with a literal argument is replaced with its precomputed result. This reduces script size but changes the script hash, which can be surprising during audits.
+Enabled by default. Evaluates constant expressions at compile time. For example, `sha256(0x68656c6c6f)` with a literal argument is replaced with its precomputed result. This reduces script size but changes the script hash, which can be surprising during audits. Disable with `disableConstantFolding: true` or the `--disable-constant-folding` CLI flag.
 
 ## End-to-End Summary
 

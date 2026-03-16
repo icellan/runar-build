@@ -1,0 +1,518 @@
+---
+title: "Test Fixtures & Mocks"
+description: "Pre-built test keys, mock preimage helpers, and cryptographic test utilities."
+section: "testing-and-debugging"
+order: 26
+lang: "en"
+---
+
+The `runar-testing` package ships with deterministic test keys, mock BIP-143 preimage builders, and real cryptographic primitives (ECDSA, Rabin, WOTS+, SLH-DSA) so you can write reproducible contract tests without touching the network.
+
+## Test Keys
+
+Ten pre-generated deterministic key pairs are exported for use in any test suite. Every derived value (public key, pubkey hash, address, WIF, and a test signature) was generated with `@bsv/sdk` and is known-good.
+
+### The TestKey Interface
+
+```typescript
+interface TestKey {
+  name: string;
+  privKey: string;       // 64-char hex private key
+  pubKey: string;        // 33-byte compressed public key (hex)
+  pubKeyHash: string;    // HASH160 of the public key (hex)
+  address: string;       // Base58Check mainnet address
+  wif: string;           // Wallet Import Format private key
+  /** DER-encoded ECDSA signature over TEST_MESSAGE (deterministic via RFC 6979). */
+  testSig: string;
+}
+```
+
+### Named Key Constants
+
+Each key is available as a named constant as well as through the `TEST_KEYS` array:
+
+```typescript
+import {
+  ALICE, BOB, CHARLIE, DAVE, EVE,
+  FRANK, GRACE, HEIDI, IVAN, JUDY,
+  TEST_KEYS,
+} from 'runar-testing';
+
+// Use a named key
+const alicePub = ALICE.pubKey;
+// '03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd'
+
+// Iterate all 10 keys
+for (const key of TEST_KEYS) {
+  console.log(key.name, key.address);
+}
+```
+
+The ten keys are, in order: `alice`, `bob`, `charlie`, `dave`, `eve`, `frank`, `grace`, `heidi`, `ivan`, `judy`. `TEST_KEYS` is a `TestKey[]` array indexed 0 through 9.
+
+Use these keys instead of `PrivateKey.fromRandom()` to keep tests fully reproducible across runs and environments.
+
+---
+
+## ECDSA Utilities
+
+All ECDSA helpers operate over a fixed test message so that signatures are deterministic (RFC 6979) and cross-language compatible.
+
+```typescript
+import {
+  TEST_MESSAGE,
+  TEST_MESSAGE_DIGEST,
+  signTestMessage,
+  pubKeyFromPrivKey,
+  verifyTestMessageSig,
+  verifyTestMessageSigHex,
+} from 'runar-testing';
+```
+
+### Constants
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `TEST_MESSAGE` | `number[]` | UTF-8 bytes of `"runar-test-message-v1"` |
+| `TEST_MESSAGE_DIGEST` | `string` | SHA-256 hex digest: `ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa` |
+
+### Functions
+
+**`signTestMessage(privKeyHex: string): string`** -- Sign the fixed test message with a private key. Returns a DER-encoded ECDSA signature as a hex string.
+
+**`pubKeyFromPrivKey(privKeyHex: string): string`** -- Derive the compressed (33-byte) public key from a hex private key.
+
+**`verifyTestMessageSig(sigBytes: Uint8Array, pubKeyBytes: Uint8Array): boolean`** -- Verify a DER-encoded signature (with optional trailing sighash byte) against a public key over `TEST_MESSAGE`.
+
+**`verifyTestMessageSigHex(sigHex: string, pubKeyHex: string): boolean`** -- Hex-string convenience wrapper around `verifyTestMessageSig`.
+
+```typescript
+import { ALICE, signTestMessage, verifyTestMessageSigHex } from 'runar-testing';
+
+const sig = signTestMessage(ALICE.privKey);
+const valid = verifyTestMessageSigHex(sig, ALICE.pubKey); // true
+```
+
+---
+
+## Mock Preimage Helpers
+
+Contracts that use `SigHashPreimage` for introspection (covenants, recursive contracts) need a valid BIP-143 preimage and an OP_PUSH_TX signature. The mock preimage module builds these without a real Bitcoin transaction.
+
+```typescript
+import {
+  buildStatefulPreimage,
+  buildLockingScript,
+  buildContinuationOutput,
+  computeHashOutputs,
+  serializeState,
+} from 'runar-testing';
+import type {
+  StatefulPreimageParams,
+  StatefulPreimageResult,
+} from 'runar-testing';
+```
+
+### StatefulPreimageParams
+
+The input to `buildStatefulPreimage`:
+
+```typescript
+interface StatefulPreimageParams {
+  artifact: RunarArtifact;
+  constructorArgs: Record<string, bigint | boolean | string>;
+  state: Record<string, bigint | boolean | string>;
+  methodIndex?: number;          // default: 0
+  satoshis?: bigint;             // default: 10000n
+  newState?: Record<string, bigint | boolean | string>;
+  outputSatoshis?: bigint;       // default: same as satoshis
+  additionalOutputs?: string[];  // extra raw hex outputs
+  version?: number;              // default: 1
+  locktime?: number;             // default: 0
+  sequence?: number;             // default: 0xffffffff
+}
+```
+
+### StatefulPreimageResult
+
+The return value from `buildStatefulPreimage`:
+
+```typescript
+interface StatefulPreimageResult {
+  preimageHex: string;     // hex-encoded BIP-143 preimage
+  signatureHex: string;    // DER-encoded OP_PUSH_TX signature (with sighash byte)
+  lockingScript: string;   // codePart + OP_RETURN + state
+  codePart: string;        // just the code part (without OP_RETURN + state)
+  scriptCode: string;      // post-OP_CODESEPARATOR portion
+  hashOutputs: string;     // hashOutputs used in the preimage
+}
+```
+
+### buildStatefulPreimage
+
+```typescript
+function buildStatefulPreimage(params: StatefulPreimageParams): StatefulPreimageResult;
+```
+
+Builds a complete mock BIP-143 preimage that passes the compiled contract's `checkPreimage` signature check and state deserialization. It signs the preimage with the OP_PUSH_TX private key (`k=1`) and enforces low-S.
+
+```typescript
+const result = buildStatefulPreimage({
+  artifact,
+  constructorArgs: { owner: ALICE.pubKey },
+  state: { count: 0n },
+  newState: { count: 1n },
+});
+// result.preimageHex  -- feed to the contract
+// result.signatureHex -- the OP_PUSH_TX sig argument
+```
+
+### buildLockingScript
+
+```typescript
+function buildLockingScript(
+  artifact: RunarArtifact,
+  constructorArgs: Record<string, bigint | boolean | string>,
+  state: Record<string, bigint | boolean | string>,
+): string;
+```
+
+Builds the full locking script: `codePart + OP_RETURN (0x6a) + serialized state`. If the artifact has no `stateFields`, returns the code part alone.
+
+### buildContinuationOutput
+
+```typescript
+function buildContinuationOutput(
+  codePart: string,
+  stateFields: StateField[],
+  newState: Record<string, bigint | boolean | string>,
+  satoshis: bigint,
+): string;
+```
+
+Builds a serialized transaction output for state-mutating methods. The returned hex encodes: `amount (8-byte LE) + varint(scriptLen) + script`.
+
+### computeHashOutputs
+
+```typescript
+function computeHashOutputs(outputs: string[]): string;
+```
+
+Computes the BIP-143 `hashOutputs` field by concatenating all output hex strings and double-SHA-256 hashing the result.
+
+### serializeState
+
+```typescript
+function serializeState(
+  fields: StateField[],
+  values: Record<string, unknown>,
+): string;
+```
+
+Serializes state values to hex bytes (no OP_RETURN prefix). Fields are sorted by their `index` property. Integers are encoded as fixed-width 8-byte LE sign-magnitude (`encodeNum2Bin`). Booleans encode as `01` / `00`. String types (`PubKey`, `Addr`, `Ripemd160`, `Sha256`, `Point`) pass through as-is.
+
+---
+
+## Rabin Signature Utilities
+
+Real Rabin signing and verification for oracle-style contracts. The verification equation is `(sig^2 + padding) mod n === SHA256(msg) mod n`, where the SHA-256 hash is interpreted as an unsigned little-endian bigint to match Bitcoin Script's `OP_MOD` / `OP_ADD` behavior.
+
+```typescript
+import {
+  rabinSign,
+  rabinVerify,
+  rabinVerifyHex,
+  generateRabinKeyPair,
+  RABIN_TEST_KEY,
+} from 'runar-testing';
+import type { RabinKeyPair } from 'runar-testing';
+```
+
+### RabinKeyPair
+
+```typescript
+interface RabinKeyPair {
+  p: bigint;
+  q: bigint;
+  n: bigint;   // n = p * q
+}
+```
+
+### RABIN_TEST_KEY
+
+A deterministic test keypair using 130-bit primes that are congruent to 3 (mod 4). The modulus `n` is larger than 2^256 so that `(sig^2 + padding) % n` has the same byte width as a SHA-256 output -- otherwise `OP_EQUALVERIFY` fails on byte-for-byte comparison.
+
+```typescript
+const RABIN_TEST_KEY: RabinKeyPair = {
+  p: 1361129467683753853853498429727072846227n,
+  q: 1361129467683753853853498429727082846007n,
+  n: /* p * q */,
+};
+```
+
+### generateRabinKeyPair
+
+```typescript
+function generateRabinKeyPair(): RabinKeyPair;
+```
+
+Returns a copy of `RABIN_TEST_KEY`. Use this when you need a fresh object rather than a shared reference.
+
+### rabinSign
+
+```typescript
+function rabinSign(
+  msg: Uint8Array,
+  kp: RabinKeyPair,
+): { sig: bigint; padding: bigint };
+```
+
+Signs a message with a Rabin private key. Iterates padding values from 0 to 999 until a quadratic residue is found. Throws if no valid padding is found within 1000 attempts.
+
+### rabinVerify
+
+```typescript
+function rabinVerify(
+  msg: Uint8Array,
+  sig: bigint,
+  padding: Uint8Array,
+  pubkey: bigint,
+): boolean;
+```
+
+Verifies a Rabin signature. The `padding` parameter is interpreted as an unsigned little-endian bigint.
+
+### rabinVerifyHex
+
+```typescript
+function rabinVerifyHex(
+  msgHex: string,
+  sig: bigint,
+  paddingHex: string,
+  pubkey: bigint,
+): boolean;
+```
+
+Convenience wrapper that accepts hex-encoded `msg` and `padding` strings. Useful when working with ByteString values from the runtime.
+
+```typescript
+const msg = new TextEncoder().encode('oracle-price:60000');
+const { sig, padding } = rabinSign(msg, RABIN_TEST_KEY);
+
+const valid = rabinVerify(
+  msg,
+  sig,
+  new Uint8Array(new BigUint64Array([BigInt(padding)]).buffer),
+  RABIN_TEST_KEY.n,
+);
+// true
+```
+
+---
+
+## WOTS+ (Winternitz One-Time Signature)
+
+A reference WOTS+ implementation (RFC 8391 compatible) with tweakable hash function `F(pubSeed, ADRS, M)`. Used by the interpreter for real verification in dual-oracle tests.
+
+```typescript
+import {
+  wotsKeygen,
+  wotsSign,
+  wotsVerify,
+  WOTS_PARAMS,
+} from 'runar-testing';
+import type { WOTSKeyPair } from 'runar-testing';
+```
+
+### Parameters
+
+The implementation uses `w=16, n=32 (SHA-256)`:
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `W` | 16 | Winternitz parameter (base-16) |
+| `N` | 32 | Hash output length (SHA-256) |
+| `LOG_W` | 4 | Bits per digit |
+| `LEN1` | 64 | Message digits (256 / 4) |
+| `LEN2` | 3 | Checksum digits |
+| `LEN` | 67 | Total hash chains |
+
+These are exported as the `WOTS_PARAMS` constant:
+
+```typescript
+const WOTS_PARAMS: {
+  readonly W: 16;
+  readonly N: 32;
+  readonly LOG_W: 4;
+  readonly LEN1: 64;
+  readonly LEN2: 3;
+  readonly LEN: 67;
+};
+```
+
+Signature size: `67 * 32 = 2,144 bytes`. Public key: `64 bytes (pubSeed(32) || pkRoot(32))`.
+
+### WOTSKeyPair
+
+```typescript
+interface WOTSKeyPair {
+  sk: Uint8Array[];  // 67 secret key elements, each 32 bytes
+  pk: Uint8Array;    // 64-byte public key: pubSeed(32) || pkRoot(32)
+}
+```
+
+### wotsKeygen
+
+```typescript
+function wotsKeygen(seed?: Uint8Array, pubSeed?: Uint8Array): WOTSKeyPair;
+```
+
+Generates a WOTS+ keypair. If `seed` is provided, secret keys are derived deterministically as `SHA-256(seed || i)`. If `pubSeed` is provided, it is used as the tweakable hash domain separator. Both default to random bytes when omitted.
+
+### wotsSign
+
+```typescript
+function wotsSign(
+  msg: Uint8Array,
+  sk: Uint8Array[],
+  pubSeed: Uint8Array,
+): Uint8Array;
+```
+
+Signs a message with WOTS+. The message is SHA-256 hashed internally. Returns a single `Uint8Array` of `67 * 32 = 2,144` bytes. The `pubSeed` parameter should be the first 32 bytes of the public key.
+
+### wotsVerify
+
+```typescript
+function wotsVerify(
+  msg: Uint8Array,
+  sig: Uint8Array,
+  pk: Uint8Array,
+): boolean;
+```
+
+Verifies a WOTS+ signature. `msg` is the original (unhashed) message. `sig` must be `2,144` bytes. `pk` must be `64` bytes. The function splits the public key into `pubSeed` and `pkRoot`, reconstructs chain endpoints from the signature, and compares the computed root against `pkRoot`.
+
+```typescript
+const seed = new Uint8Array(32); // deterministic zero seed
+const kp = wotsKeygen(seed);
+
+const msg = new TextEncoder().encode('hello world');
+const sig = wotsSign(msg, kp.sk, kp.pk.slice(0, 32));
+const valid = wotsVerify(msg, sig, kp.pk); // true
+```
+
+---
+
+## SLH-DSA (Stateless Hash-Based Signatures)
+
+A full FIPS 205 (SLH-DSA) SHA-256 reference implementation covering all six SHA-256 parameter sets. Used by the interpreter for real verification in dual-oracle tests.
+
+```typescript
+import {
+  slhKeygen,
+  slhSign,
+  slhVerify,
+  slhVerifyVerbose,
+  SLH_SHA2_128s, SLH_SHA2_128f,
+  SLH_SHA2_192s, SLH_SHA2_192f,
+  SLH_SHA2_256s, SLH_SHA2_256f,
+  ALL_SHA2_PARAMS,
+} from 'runar-testing';
+import type { SLHParams, SLHKeyPair } from 'runar-testing';
+```
+
+### SLHParams
+
+```typescript
+interface SLHParams {
+  name: string;   // e.g. 'SLH-DSA-SHA2-128s'
+  n: number;      // Security parameter (hash output bytes): 16, 24, or 32
+  h: number;      // Total tree height
+  d: number;      // Number of hypertree layers
+  hp: number;     // Height of each subtree: h/d
+  a: number;      // FORS tree height
+  k: number;      // Number of FORS trees
+  w: number;      // Winternitz parameter (always 16)
+  len: number;    // WOTS+ chain count
+}
+```
+
+### Parameter Sets
+
+| Constant | Name | n | h | d | hp | a | k |
+|----------|------|---|---|---|----|---|---|
+| `SLH_SHA2_128s` | SLH-DSA-SHA2-128s | 16 | 63 | 7 | 9 | 12 | 14 |
+| `SLH_SHA2_128f` | SLH-DSA-SHA2-128f | 16 | 66 | 22 | 3 | 6 | 33 |
+| `SLH_SHA2_192s` | SLH-DSA-SHA2-192s | 24 | 63 | 7 | 9 | 14 | 17 |
+| `SLH_SHA2_192f` | SLH-DSA-SHA2-192f | 24 | 66 | 22 | 3 | 8 | 33 |
+| `SLH_SHA2_256s` | SLH-DSA-SHA2-256s | 32 | 64 | 8 | 8 | 14 | 22 |
+| `SLH_SHA2_256f` | SLH-DSA-SHA2-256f | 32 | 68 | 17 | 4 | 8 | 35 |
+
+The `ALL_SHA2_PARAMS` array contains all six parameter sets in the order listed above. The `s` (small) variants produce smaller signatures; the `f` (fast) variants are faster to sign and verify.
+
+### SLHKeyPair
+
+```typescript
+interface SLHKeyPair {
+  sk: Uint8Array;  // SK.seed || SK.prf || PK.seed || PK.root (4*n bytes)
+  pk: Uint8Array;  // PK.seed || PK.root (2*n bytes)
+}
+```
+
+### slhKeygen
+
+```typescript
+function slhKeygen(params: SLHParams, seed?: Uint8Array): SLHKeyPair;
+```
+
+Generates an SLH-DSA keypair. If `seed` is provided, it must be `3*n` bytes and is split into `SK.seed`, `SK.prf`, and `PK.seed`. If omitted, random bytes are used. The function computes the root of the top XMSS tree to derive `PK.root`.
+
+### slhSign
+
+```typescript
+function slhSign(params: SLHParams, msg: Uint8Array, sk: Uint8Array): Uint8Array;
+```
+
+Signs a message using the full SLH-DSA algorithm: randomized message hashing, FORS signature, and hypertree (multi-layer XMSS) signature. Returns the concatenated signature bytes `R || forsSig || htSig`.
+
+### slhVerify
+
+```typescript
+function slhVerify(
+  params: SLHParams,
+  msg: Uint8Array,
+  sig: Uint8Array,
+  pk: Uint8Array,
+): boolean;
+```
+
+Verifies an SLH-DSA signature. Returns `false` if the public key is not `2*n` bytes or the computed root does not match `PK.root`.
+
+### slhVerifyVerbose
+
+```typescript
+function slhVerifyVerbose(
+  params: SLHParams,
+  msg: Uint8Array,
+  sig: Uint8Array,
+  pk: Uint8Array,
+): {
+  forsPk: Uint8Array;
+  wotsPks: Uint8Array[];
+  roots: Uint8Array[];
+  treeIdx: bigint;
+  leafIdx: number;
+};
+```
+
+Returns intermediate values from the verification process for debugging: the FORS public key, per-layer WOTS+ public keys, per-layer Merkle roots, and the tree/leaf indices derived from the message digest.
+
+```typescript
+const kp = slhKeygen(SLH_SHA2_128s);
+const msg = new TextEncoder().encode('test message');
+const sig = slhSign(SLH_SHA2_128s, msg, kp.sk);
+const valid = slhVerify(SLH_SHA2_128s, msg, sig, kp.pk); // true
+```
+
+> **Performance note:** SLH-DSA key generation and signing are computationally expensive, especially for the `256s` and `256f` parameter sets. Use the `128s` or `128f` parameter sets in tests unless you specifically need higher security levels.

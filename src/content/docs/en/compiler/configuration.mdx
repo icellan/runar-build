@@ -1,6 +1,6 @@
 ---
 title: "Compiler Configuration"
-description: "Configuring the compiler via runar.config."
+description: "Compiler options, CLI flags, and optimizer settings."
 section: "compiler"
 order: 30
 lang: "en"
@@ -16,7 +16,7 @@ When using the compiler as a library via `runar-compiler`, you pass a `CompileOp
 import { compile } from 'runar-compiler';
 
 const result = compile(sourceCode, {
-  fileName: 'P2PKH.runar.ts',
+  fileName: 'P2PKH.ts',
   constructorArgs: { pubKeyHash: '0x89abcdef...' },
 });
 ```
@@ -25,12 +25,12 @@ const result = compile(sourceCode, {
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `fileName` | `string` | `"contract.runar.ts"` | Source file name. Used in diagnostics and source maps. The file extension determines the parser (`.ts`, `.go`, `.rs`, `.py`). |
+| `fileName` | `string` | `"contract.ts"` | Source file name. Used in diagnostics and source maps. The file extension determines the parser (`.ts`, `.go`, `.rs`, `.py`). |
 | `parseOnly` | `boolean` | `false` | Stop after the parse pass. Returns only the `ContractNode` AST. |
 | `validateOnly` | `boolean` | `false` | Stop after the validate pass. Returns the AST and validation diagnostics. |
 | `typecheckOnly` | `boolean` | `false` | Stop after the type-check pass. Returns the AST with type annotations. |
-| `constructorArgs` | `Record<string, string>` | `undefined` | Constructor arguments to bake into the compiled script. When provided, the emitter replaces `OP_0` placeholders with actual values. |
-| `disableConstantFolding` | `boolean` | `true` | When `false`, enables the constant folder optimization. Disabled by default because it changes script hashes. |
+| `constructorArgs` | `Record<string, bigint \| boolean \| string>` | `undefined` | Constructor arguments to bake into the compiled script. When provided, the emitter replaces `OP_0` placeholders with actual values. |
+| `disableConstantFolding` | `boolean` | `false` | When `true`, disables the constant folder optimization. Constant folding is enabled by default. |
 
 ### Early Exit Options
 
@@ -39,15 +39,17 @@ The `parseOnly`, `validateOnly`, and `typecheckOnly` options cause the compiler 
 ```typescript
 // Parse only -- get the AST for syntax analysis
 const parseResult = compile(source, { parseOnly: true });
-console.log(parseResult.contract); // ContractNode AST
+console.log(parseResult.contract); // ContractNode | null
+console.log(parseResult.errors);   // CompilerDiagnostic[]
 
 // Validate only -- check structural rules
 const validateResult = compile(source, { validateOnly: true });
-console.log(validateResult.diagnostics); // validation errors, if any
+console.log(validateResult.errors);   // CompilerDiagnostic[]
+console.log(validateResult.warnings); // CompilerDiagnostic[]
 
 // Typecheck only -- verify types without lowering
 const typecheckResult = compile(source, { typecheckOnly: true });
-console.log(typecheckResult.diagnostics); // type errors, if any
+console.log(typecheckResult.errors); // CompilerDiagnostic[]
 ```
 
 When none of these flags are set, the compiler runs all six passes and produces the full output.
@@ -77,26 +79,26 @@ In addition to the unified `compile()` function, the compiler exports each pass 
 import { parse, validate, typecheck, lowerToANF } from 'runar-compiler';
 
 // Step through passes manually
-const parseResult = parse(source, 'Counter.runar.ts');
+const parseResult = parse(source, 'Counter.ts');
 const validationResult = validate(parseResult.contract);
-const typecheckResult = typecheck(validationResult.contract);
-const anfProgram = lowerToANF(typecheckResult.contract);
+const typecheckResult = typecheck(validationResult);
+const anfProgram = lowerToANF(typecheckResult.typedContract);
 ```
 
 ### Function Signatures
 
 ```typescript
 parse(source: string, fileName?: string): ParseResult
-// ParseResult: { contract: ContractNode, diagnostics: Diagnostic[] }
+// ParseResult: { contract: ContractNode | null; errors: CompilerDiagnostic[] }
 
 validate(contract: ContractNode): ValidationResult
-// ValidationResult: { contract: ContractNode, diagnostics: Diagnostic[], valid: boolean }
+// ValidationResult: { errors: CompilerDiagnostic[]; warnings: CompilerDiagnostic[] }
 
 typecheck(contract: ContractNode): TypeCheckResult
-// TypeCheckResult: { contract: ContractNode, diagnostics: Diagnostic[], valid: boolean }
+// TypeCheckResult: { typedContract: ContractNode; errors: CompilerDiagnostic[] }
 
 lowerToANF(contract: ContractNode): ANFProgram
-// ANFProgram: { name: string, constructor: ANFConstructor, methods: ANFMethod[] }
+// ANFProgram: { contractName: string; properties: ANFProperty[]; methods: ANFMethod[] }
 ```
 
 These functions are useful when building custom tooling on top of the Runar compiler, such as IDE plugins, documentation generators, or alternative backends.
@@ -130,12 +132,8 @@ runar compile contracts/*.runar.ts
 | ---- | ----------- |
 | `--output <dir>` | Output directory for compiled artifacts. Defaults to `./artifacts`. |
 | `--ir` | Include the ANF intermediate representation in the artifact JSON. Useful for debugging and cross-compiler verification. |
-| `--asm` | Include the human-readable Bitcoin Script assembly in the artifact JSON. |
-| `--parse-only` | Stop after parsing. Print the AST and exit. |
-| `--validate-only` | Stop after validation. Print diagnostics and exit. |
-| `--typecheck-only` | Stop after type-checking. Print diagnostics and exit. |
-| `--enable-constant-folding` | Enable the constant folder optimization (disabled by default). |
-| `--constructor-args <json>` | JSON object of constructor arguments to embed in the script. |
+| `--asm` | Print assembly to stdout (ASM is always included in the artifact). |
+| `--disable-constant-folding` | Disable the constant folder optimization (enabled by default). |
 
 ### Examples
 
@@ -143,15 +141,8 @@ runar compile contracts/*.runar.ts
 # Compile with full debug output
 runar compile contracts/P2PKH.runar.ts --output ./artifacts --ir --asm
 
-# Check syntax only (useful in CI)
-runar compile contracts/*.runar.ts --validate-only
-
-# Compile with constructor arguments pre-filled
-runar compile contracts/P2PKH.runar.ts \
-  --constructor-args '{"pubKeyHash": "89abcdef01234567890abcdef01234567890abcd"}'
-
-# Compile with constant folding enabled
-runar compile contracts/Counter.runar.ts --enable-constant-folding --output ./build
+# Compile with constant folding disabled
+runar compile contracts/Counter.runar.ts --disable-constant-folding --output ./build
 ```
 
 ### Exit Codes
@@ -159,10 +150,7 @@ runar compile contracts/Counter.runar.ts --enable-constant-folding --output ./bu
 | Code | Meaning |
 | ---- | ------- |
 | 0 | Compilation succeeded |
-| 1 | Parse error (invalid syntax) |
-| 2 | Validation error (language subset violation) |
-| 3 | Type error |
-| 4 | Internal compiler error |
+| 1 | Any compilation failure (parse error, validation error, type error, or internal error) |
 
 Diagnostics are printed to stderr. The compiled artifact (if any) is written to the output directory.
 
@@ -180,9 +168,9 @@ The ANF EC optimizer is **enabled by default** for contracts that use elliptic c
 
 ### Constant Folder
 
-The constant folder is **disabled by default**. Enable it with `disableConstantFolding: false` in the API or `--enable-constant-folding` on the CLI.
+The constant folder is **enabled by default**. Disable it with `disableConstantFolding: true` in the API or `--disable-constant-folding` on the CLI.
 
-When enabled, the constant folder evaluates expressions with all-literal arguments at compile time. For example:
+The constant folder evaluates expressions with all-literal arguments at compile time. For example:
 
 ```typescript
 // Before constant folding:
@@ -192,31 +180,7 @@ let hash = sha256(0x68656c6c6f);
 let hash = 0x2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824;
 ```
 
-**Why is it disabled by default?** Constant folding changes the script bytes, which changes the script hash, which changes the contract address. In audit and verification contexts, this can be confusing -- the auditor expects to see the `sha256` call in the script, not a precomputed constant. Enable constant folding only when you want the smallest possible script and are aware of the implications.
-
-## Project Configuration File
-
-For projects that compile multiple contracts with shared settings, you can create a `runar.config.json` at the project root:
-
-```json
-{
-  "contracts": "contracts/*.runar.ts",
-  "output": "./artifacts",
-  "includeIR": false,
-  "includeASM": true,
-  "enableConstantFolding": false
-}
-```
-
-The CLI reads this file automatically when run from the project root. CLI flags override config file values.
-
-| Field | Type | Default | Description |
-| ----- | ---- | ------- | ----------- |
-| `contracts` | `string` | `"contracts/*.runar.ts"` | Glob pattern for contract source files. |
-| `output` | `string` | `"./artifacts"` | Output directory for compiled artifacts. |
-| `includeIR` | `boolean` | `false` | Include ANF IR in artifacts. |
-| `includeASM` | `boolean` | `false` | Include assembly in artifacts. |
-| `enableConstantFolding` | `boolean` | `false` | Enable the constant folder. |
+**Why might you disable it?** Constant folding changes the script bytes, which changes the script hash, which changes the contract address. In audit and verification contexts, this can be confusing -- the auditor expects to see the `sha256` call in the script, not a precomputed constant. Disable constant folding with `disableConstantFolding: true` or `--disable-constant-folding` when you need the unfolded script for auditing.
 
 ## What's Next
 

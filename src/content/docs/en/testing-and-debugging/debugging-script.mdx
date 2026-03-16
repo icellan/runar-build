@@ -1,39 +1,280 @@
 ---
 title: "Debugging Compiled Script"
-description: "Debugging tools and techniques."
+description: "Interactive step-through debugger, source maps, and stack inspection for Rúnar contracts."
 section: "testing-and-debugging"
 order: 30
 lang: "en"
 ---
 
-When a contract does not behave as expected, you need to inspect the compiled Bitcoin Script and trace its execution. Runar provides several tools to help you debug at both the high-level source and low-level script level, including source maps, a step-through script debugger, and stack inspection utilities.
+When a contract does not behave as expected, Rúnar provides an interactive step-through script debugger (`runar debug`), source maps that link opcodes back to your source code, a steppable `ScriptVM` for programmatic trace collection, and verbose test output with stack dumps. Together, these tools let you see exactly what happens inside the Bitcoin Script at every opcode.
 
-## Using Source Maps to Trace Errors
+## The Interactive Debugger
 
-Every compiled artifact includes a source map that links Bitcoin Script opcodes back to their originating lines of Runar source code. When a test fails or a transaction is rejected, the source map lets you pinpoint exactly which high-level statement caused the failure.
+The `runar debug` command launches an interactive REPL that executes your compiled contract one opcode at a time. You can inspect the main and alt stacks, set breakpoints by opcode index or source line, and step through execution with source-mapped annotations.
 
-### How Source Maps Work
+### Launching the Debugger
 
-The source map is embedded in the compiled JSON artifact under the `sourceMap` key:
+```bash
+runar debug ./artifacts/PriceBet.json --method settle --args '{"price": 60000}'
+```
+
+| Flag | Description |
+|------|-------------|
+| `<artifact>` | Path to a compiled JSON artifact (must include `sourceMap`) |
+| `-m, --method <name>` | Public method to invoke |
+| `-a, --args <json>` | Method arguments as a JSON object |
+| `-u, --unlock <hex>` | Raw unlocking script hex (alternative to `--method`/`--args`) |
+| `-b, --break <loc>` | Initial breakpoint: opcode index or `file:line` |
+
+The debugger loads the artifact, builds the unlocking script from the method and arguments, and drops you into an interactive session:
+
+```
+Runar Script Debugger v0.1.0
+Contract: PriceBet (1204 bytes, 89 opcodes)
+Method:   settle
+Source:   PriceBet.runar.ts
+
+>
+```
+
+### Debugger Commands
+
+| Command | Short | Description |
+|---------|-------|-------------|
+| `step` | `s` | Execute one opcode and print the result |
+| `next` | `n` | Execute until the source line changes (step over inlined helpers) |
+| `continue` | `c` | Run until the next breakpoint, error, or completion |
+| `stack` | `st` | Print the full main stack with type annotations |
+| `altstack` | `as` | Print the alt stack |
+| `break <loc>` | `b` | Set a breakpoint: `b 47` (opcode index) or `b PriceBet.runar.ts:24` (source line) |
+| `delete <id>` | `d` | Delete a breakpoint by ID |
+| `info` | `i` | Show current position, opcode count, breakpoints, and source location |
+| `backtrace` | `bt` | Show the last N executed opcodes with stack depths (default 10) |
+| `run` | `r` | Restart execution from the beginning |
+| `quit` | `q` | Exit the debugger |
+| `help` | `h` | Show the command list |
+
+### Example Session
+
+```
+> s
+   [0000] OP_DUP               stack: [0xe803..0000]
+       PriceBet.runar.ts:23  const msg = num2bin(price, 8n);
+
+> s
+   [0001] OP_TOALTSTACK        stack: []
+       PriceBet.runar.ts:23  const msg = num2bin(price, 8n);
+
+> b PriceBet.runar.ts:24
+Breakpoint 1 at PriceBet.runar.ts:24 (opcode #44)
+
+> c
+Hit breakpoint 1 — PriceBet.runar.ts:24 (opcode #44)
+   [002c] OP_EQUALVERIFY       stack: [0x01, 0x01]
+       PriceBet.runar.ts:24  assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
+
+> st
+Main stack (2 items, top first):
+  [1] 0x01  true
+  [0] 0x01  true
+
+> c
+Script completed successfully.
+Final stack: [0x01]
+```
+
+Each step shows the byte offset (hex), the opcode name, the stack contents, and — when a source map is available — the corresponding source file, line number, and source text.
+
+### Stack Annotations
+
+The debugger automatically annotates stack items based on their size and content:
+
+| Size | Prefix | Annotation |
+|------|--------|------------|
+| 0 bytes | — | `false` |
+| 1 byte, value 0x01 | — | `true` |
+| 33 bytes, starts with 0x02/0x03 | — | `(PubKey)` |
+| 20 bytes | — | `(Ripemd160/Addr)` |
+| 32 bytes | — | `(Sha256)` |
+| 64 bytes | — | `(Point)` |
+| 1-8 bytes | — | Decoded as a script number (e.g., `60000n`) |
+
+### Setting Breakpoints
+
+Breakpoints can be set by opcode index or by source line. Source-line breakpoints are resolved through the artifact's source map:
+
+```
+> b 47
+Breakpoint 1 at opcode #47
+
+> b PriceBet.runar.ts:26
+Breakpoint 2 at PriceBet.runar.ts:26 (opcode #52)
+
+> d 1
+Deleted breakpoint #1
+```
+
+When you `continue`, execution runs until it hits a breakpoint, encounters an error, or finishes.
+
+### Unlocking and Locking Script Context
+
+The debugger executes both the unlocking script and the locking script in sequence, mirroring how a Bitcoin node validates a transaction. Each step shows which script is executing:
+
+```
+UNL [0000] OP_1                 stack: [0x01]
+       (unlocking script)
+
+   [0000] OP_1                 stack: [0x01, 0x01]
+       P2PKH.runar.ts:12  assert(hash160(pubKey) === this.pubKeyHash);
+```
+
+Steps in the unlocking script are prefixed with `UNL`. Steps in the locking script show the source location when a source map is available.
+
+## Source Maps
+
+Every compiled artifact includes a source map (under the `sourceMap` key) that connects opcode indices to source file locations. The source map uses this format:
 
 ```json
 {
   "sourceMap": {
     "mappings": [
-      { "scriptOffset": 0, "opcode": "OP_DUP", "source": "P2PKH.runar.ts", "line": 12, "col": 4 },
-      { "scriptOffset": 1, "opcode": "OP_HASH160", "source": "P2PKH.runar.ts", "line": 12, "col": 4 },
-      { "scriptOffset": 22, "opcode": "OP_EQUALVERIFY", "source": "P2PKH.runar.ts", "line": 12, "col": 4 },
-      { "scriptOffset": 23, "opcode": "OP_CHECKSIG", "source": "P2PKH.runar.ts", "line": 13, "col": 4 }
+      { "opcodeIndex": 0, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 4 },
+      { "opcodeIndex": 1, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 4 },
+      { "opcodeIndex": 5, "sourceFile": "P2PKH.runar.ts", "line": 13, "column": 4 }
     ]
   }
 }
 ```
 
-Each mapping entry connects a byte offset in the compiled script to a source file, line, and column. The test runner and debugger use this data automatically.
+The debugger, the test runner's verbose output, and the `SourceMapResolver` class all use this data.
 
-### Viewing Source-Mapped Errors
+### SourceMapResolver API
 
-When a test fails with `--verbose` enabled, the error output includes source-mapped context:
+The `SourceMapResolver` class (exported from `runar-testing`) provides programmatic access to the source map:
+
+```typescript
+import { SourceMapResolver } from 'runar-testing';
+
+const resolver = new SourceMapResolver(artifact.sourceMap);
+
+// Map an opcode index to a source location
+const loc = resolver.resolve(44);
+// { file: 'PriceBet.runar.ts', line: 24, column: 4, opcodeIndex: 44 }
+
+// Map a source line back to opcode indices (for breakpoints)
+const offsets = resolver.reverseResolve('PriceBet.runar.ts', 24);
+// [44, 45, 46]
+
+// List all source files in the map
+resolver.sourceFiles; // ['PriceBet.runar.ts']
+
+// Check if the map has any entries
+resolver.isEmpty; // false
+```
+
+## Programmatic Step-Through with ScriptVM
+
+The `ScriptVM` class supports both full execution (`execute`) and step-by-step execution (`loadHex` + `step`). Use the step API to build custom debugging tools or collect execution traces in tests:
+
+```typescript
+import { ScriptVM, bytesToHex } from 'runar-testing';
+
+const vm = new ScriptVM();
+vm.loadHex(unlockingHex, lockingHex);
+
+const trace = [];
+while (!vm.isComplete) {
+  const result = vm.step();
+  if (!result) break;
+  trace.push(result);
+}
+
+console.log(`Executed ${trace.length} opcodes`);
+console.log(`Success: ${vm.isSuccess}`);
+console.log(`Final stack: ${vm.currentStack.map(s => bytesToHex(s))}`);
+```
+
+Each `step()` call returns a `StepResult`:
+
+```typescript
+interface StepResult {
+  offset: number;                    // Byte offset in the active script
+  opcode: string;                    // e.g. 'OP_ADD', 'OP_DUP', 'PUSH_20'
+  mainStack: Uint8Array[];           // Main stack after this opcode
+  altStack: Uint8Array[];            // Alt stack after this opcode
+  error?: string;                    // Set if the opcode failed
+  context: 'unlocking' | 'locking'; // Which script is executing
+}
+```
+
+`step()` returns `null` when there are no more opcodes. After completion, inspect `vm.isSuccess` and `vm.currentStack`.
+
+### ScriptVM Step API Reference
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `loadHex(unlock, lock)` | method | Load scripts from hex for stepping |
+| `step()` | method | Execute one opcode, return `StepResult` or `null` |
+| `pc` | getter | Current program counter (byte offset) |
+| `context` | getter | `'unlocking'` or `'locking'` |
+| `currentStack` | getter | Copy of the main stack |
+| `currentAltStack` | getter | Copy of the alt stack |
+| `isComplete` | getter | Whether execution has finished |
+| `isSuccess` | getter | Whether execution completed successfully |
+
+### Collecting a Trace in Tests
+
+A common pattern is to collect a trace and assert on specific execution points:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { ScriptVM, hexToBytes, bytesToHex } from 'runar-testing';
+
+describe('execution trace', () => {
+  it('traces OP_1 OP_2 OP_ADD', () => {
+    const vm = new ScriptVM();
+    vm.loadHex('', '515293'); // OP_1 OP_2 OP_ADD
+
+    const steps = [];
+    while (!vm.isComplete) {
+      const result = vm.step();
+      if (result) steps.push(result);
+    }
+
+    expect(steps).toHaveLength(3);
+    expect(steps[0].opcode).toBe('OP_1');
+    expect(steps[1].opcode).toBe('OP_2');
+    expect(steps[2].opcode).toBe('OP_ADD');
+    expect(vm.isSuccess).toBe(true);
+    expect(vm.currentStack).toHaveLength(1);
+  });
+
+  it('detects OP_VERIFY failure', () => {
+    const vm = new ScriptVM();
+    // OP_1 OP_VERIFY OP_0 OP_VERIFY (second verify fails)
+    vm.loadHex('', '51690069');
+
+    const steps = [];
+    while (!vm.isComplete) {
+      const result = vm.step();
+      if (result) steps.push(result);
+    }
+
+    const failStep = steps.find(s => s.error);
+    expect(failStep).toBeDefined();
+    expect(failStep.opcode).toBe('OP_VERIFY');
+    expect(vm.isSuccess).toBe(false);
+  });
+});
+```
+
+## Verbose Test Output
+
+When running tests with `--verbose`, failed assertions include source-mapped context:
+
+```bash
+runar test --verbose
+```
 
 ```
 FAIL  tests/PriceBet.test.ts
@@ -41,196 +282,56 @@ FAIL  tests/PriceBet.test.ts
     Script execution failed at offset 47: OP_VERIFY
     Source: PriceBet.runar.ts:24
       22 |   public settle(price: bigint, rabinSig: RabinSig, ...) {
-      23 |     const message = packOracleMessage(price);
-    > 24 |     assert(verifyRabinSig(message, rabinSig, this.oraclePubKey));
+      23 |     const msg = num2bin(price, 8n);
+    > 24 |     assert(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
       25 |     if (price > this.strikePrice) {
-```
-
-This tells you that the `verifyRabinSig` assertion at line 24 failed, which corresponds to `OP_VERIFY` at script byte offset 47.
-
-## The Script Debugger
-
-Runar includes a step-through script debugger that lets you execute Bitcoin Script one opcode at a time and inspect the stack at each step. Launch it from the CLI:
-
-```bash
-runar debug ./artifacts/PriceBet.json --method settle --args '{"price": 60000}'
-```
-
-This opens an interactive session:
-
-```
-Runar Script Debugger v0.1.0
-Contract: PriceBet
-Method: settle
-Script length: 1,204 bytes (89 opcodes)
-
-[0] OP_DUP                          stack: [60000]
-    PriceBet.runar.ts:22  const message = packOracleMessage(price);
-
-> step | next | continue | stack | break <offset> | quit
-```
-
-### Debugger Commands
-
-| Command | Short | Description |
-|---------|-------|-------------|
-| `step`  | `s`   | Execute one opcode and show the result |
-| `next`  | `n`   | Execute until the next source-mapped line |
-| `continue` | `c` | Run until the next breakpoint or end |
-| `stack` | `st`  | Print the current stack contents |
-| `break <offset>` | `b` | Set a breakpoint at a script byte offset |
-| `break <file>:<line>` | `b` | Set a breakpoint at a source line |
-| `info`  | `i`   | Show current position, opcode, and source line |
-| `locals` | `l`  | Show named variable bindings (from source map) |
-| `quit`  | `q`   | Exit the debugger |
-
-### Setting Breakpoints
-
-You can set breakpoints by script offset or source line:
-
-```
-> break 47
-Breakpoint 1 set at offset 47 (OP_VERIFY)
-
-> break PriceBet.runar.ts:24
-Breakpoint 2 set at offset 44 (OP_CHECKSIG) -- PriceBet.runar.ts:24
-
-> continue
-Hit breakpoint 2 at offset 44
-[44] OP_CHECKSIG                     stack: [<sig>, <pubkey>]
-     PriceBet.runar.ts:24  assert(verifyRabinSig(...));
-```
-
-## Inspecting the Stack During Execution
-
-The stack is the core execution model of Bitcoin Script. Understanding stack contents at each point is essential for debugging. The `stack` command in the debugger shows the full stack with type annotations:
-
-```
-> stack
-Stack (3 items, top first):
-  [2] 0x01                    (boolean: true)
-  [1] 0xe803000000000000      (bigint: 1000n)
-  [0] 0x02aa...aa             (bytes: 33 bytes, likely PubKey)
-```
-
-### Stack Traces in Test Output
-
-When running tests with `--verbose`, failed assertions include a full stack dump at the point of failure:
-
-```
-Script failed at OP_VERIFY (offset 47)
-Stack at failure:
-  [0] 0x00  (false)
-Expected: top of stack to be truthy
-
-Execution trace (last 5 ops):
-  [43] OP_CAT       stack: [msg_hash, sig_bytes]
-  [44] OP_SHA256    stack: [commitment]
-  [45] OP_SWAP      stack: [expected, commitment]
-  [46] OP_EQUAL     stack: [false]
-  [47] OP_VERIFY    FAILED -- top of stack is false
 ```
 
 ## Inspecting Compiled Output
 
-Sometimes you need to look at the raw compiled script. Use the `--asm` flag during compilation to include human-readable assembly in the artifact:
+Use `--asm` to include human-readable assembly and `--ir` to include the ANF intermediate representation:
 
 ```bash
-runar compile contracts/PriceBet.runar.ts --output ./artifacts --asm
+runar compile contracts/PriceBet.runar.ts --asm --ir --output ./artifacts
 ```
 
-Then inspect the artifact:
+The artifact then contains both the `asm` field (opcode names) and `ir` field (named temporaries like `t0_price`, `t1_msg`), letting you trace how high-level expressions map through the compilation pipeline to final opcodes.
+
+## Comparing Script Output
+
+Rúnar guarantees deterministic compilation. Compare compiled output against a known-good version to detect regressions:
 
 ```bash
-runar inspect ./artifacts/PriceBet.json
-```
-
-This prints a formatted disassembly with source annotations:
-
-```
-PriceBet compiled script (1,204 bytes, 89 opcodes)
-
-  # PriceBet.runar.ts:22  const message = packOracleMessage(price);
-  0000  OP_DUP
-  0001  OP_TOALTSTACK
-  0002  OP_PUSH 0x04
-  0003  OP_CAT
-
-  # PriceBet.runar.ts:24  assert(verifyRabinSig(...));
-  0028  OP_MUL
-  0029  OP_SWAP
-  002a  OP_MOD
-  002b  OP_EQUALVERIFY
-  ...
+diff <(jq -r '.asm' ./artifacts/PriceBet.json) <(jq -r '.asm' tests/golden/PriceBet.json)
 ```
 
 ## Common Script-Level Failures
 
 ### OP_VERIFY Failure
 
-The most common failure. An `OP_VERIFY` opcode consumed `false` (0x00) from the stack. This corresponds to a failed `assert()` in your source code. Check the execution trace to see which value was `false` and why.
+The most common failure. An `OP_VERIFY` consumed `false` from the stack, corresponding to a failed `assert()`. Use `runar debug` to step to the failing opcode and inspect the stack, or run `runar test --verbose` to see the source-mapped error.
 
 ### Stack Underflow
 
-The script tried to pop a value from an empty stack. This usually indicates a compiler bug or a mismatch between the unlocking script arguments and the contract's expected parameters.
+The script tried to pop from an empty stack. This usually means the unlocking script did not provide enough arguments. Check that you are passing all required arguments to the method.
 
 ### Oversized Stack
 
-Bitcoin Script has a maximum stack depth. Runar enforces a limit of 800 elements. If your contract exceeds this, you will see:
+Rúnar enforces a maximum stack depth of 800 elements at compile time. If exceeded:
 
 ```
 Error: Stack overflow -- depth 801 exceeds maximum of 800
 ```
 
-Refactor your contract to reduce stack usage, typically by breaking complex expressions into smaller methods or reducing the number of intermediate values.
+Reduce stack usage by breaking complex expressions into smaller private methods.
 
 ### Non-Minimal Encoding
 
-BSV requires numbers to use minimal encoding. A number like `0x0100` (256 in non-minimal form) will cause a script failure. The Runar compiler handles encoding correctly, but if you are constructing script manually, ensure numbers are minimally encoded.
+BSV requires numbers to use minimal encoding. The compiler handles this correctly, but if you construct unlocking scripts manually, ensure numbers are minimally encoded.
 
-## Logging and Diagnostic Output
+## Further Reading
 
-### Compile-Time Diagnostics
-
-The compiler emits warnings and info messages during compilation. Enable verbose compilation to see them:
-
-```bash
-runar compile contracts/PriceBet.runar.ts --verbose
-```
-
-```
-[info]  Parsing PriceBet.runar.ts
-[info]  Type checking passed (4 methods, 6 state fields)
-[warn]  Large script output: 1,204 bytes. Consider refactoring for smaller script size.
-[info]  Emitting artifact to ./artifacts/PriceBet.json
-[info]  Compilation complete in 118ms
-```
-
-### Runtime Tracing
-
-Enable runtime tracing in tests to get a full execution log:
-
-```typescript
-const contract = TestContract.fromSource(source, initialState);
-contract.enableTrace(); // Turn on opcode-level tracing
-
-const result = contract.call('settle', args);
-
-// Access the trace log
-for (const step of result.trace) {
-  console.log(`[${step.offset}] ${step.opcode}  stack: ${step.stack}`);
-}
-```
-
-The trace log is an array of objects with `offset`, `opcode`, `stack`, and `sourceLine` fields. You can use it to build custom debugging tools or generate visualizations.
-
-### Diffing Expected vs Actual Script
-
-When debugging a mismatch between expected and actual behavior, compare the compiled script against a known-good version:
-
-```bash
-runar compile contracts/PriceBet.runar.ts --asm --output /tmp/current
-diff /tmp/current/PriceBet.asm tests/golden/PriceBet.asm
-```
-
-This is especially useful after compiler upgrades or refactoring to ensure the compiled output has not changed unexpectedly.
+- [Writing Tests](/docs/testing-and-debugging/writing-tests) -- `TestContract` API and testing patterns
+- [The Test Runner](/docs/testing-and-debugging/test-runner) -- CLI flags, ScriptVM, and fuzzing
+- [Common Errors](/docs/testing-and-debugging/common-errors) -- error catalog with causes and solutions
+- [CLI Reference](/docs/api-reference/cli-reference) -- full `runar debug` flag reference

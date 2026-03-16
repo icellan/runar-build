@@ -1,0 +1,370 @@
+---
+title: "Advanced Testing"
+description: "Script execution, reference interpreters, and state simulation for Rúnar contracts."
+section: "testing-and-debugging"
+order: 25
+lang: "en"
+---
+
+The `runar-testing` package exports `TestContract` for most testing needs, but three additional utilities cover scenarios that `TestContract` does not: validating compiled Bitcoin Script through the BSV SDK interpreter, executing contracts at the AST level, and predicting state transitions from ANF IR. This page documents each of them.
+
+## When to Use Each Tool
+
+| Tool | Package | Purpose |
+|------|---------|---------|
+| `TestContract` | `runar-testing` | General-purpose testing. Compiles, interprets, and validates contracts in a single call. Use this for most tests. |
+| `ScriptExecutionContract` | `runar-testing` | End-to-end script validation. Compiles a contract to Bitcoin Script hex and executes it through the BSV SDK's `Spend` interpreter. Use this to confirm that compiled output actually runs on-chain. |
+| `RunarInterpreter` | `runar-testing` | AST-level execution. Directly interprets the parsed Runar AST without compiling. Use this for semantic analysis, differential testing against the compiled output, or when you need access to interpreter-level values. |
+| `computeNewState()` | `runar-sdk` | State prediction. Walks the ANF IR to compute state transitions without touching Bitcoin Script. The SDK uses this internally to auto-compute `newState` for stateful contract calls. |
+
+---
+
+## ScriptExecutionContract
+
+`ScriptExecutionContract` compiles a Runar contract with baked constructor arguments and executes the resulting locking/unlocking scripts through the BSV SDK's production-grade `Spend` class. Unlike `TestContract` (which uses the reference interpreter on the AST), this class validates the **compiled Bitcoin Script hex** end-to-end.
+
+Imported from `runar-testing`:
+
+```typescript
+import { ScriptExecutionContract } from 'runar-testing';
+```
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `artifact` | `RunarArtifact` | The compiled artifact (ABI, AST, script hex, etc.) |
+| `scriptHex` | `string` | The compiled locking script as a hex string |
+
+### `ScriptExecutionContract.fromSource()`
+
+Compiles a Runar contract from source with baked constructor arguments.
+
+```typescript
+static fromSource(
+  source: string,
+  constructorArgs: Record<string, bigint | boolean | string>,
+  fileName?: string,
+  compileOptions?: Partial<CompileOptions>,
+): ScriptExecutionContract
+```
+
+- **`source`** -- The Runar contract source code as a string.
+- **`constructorArgs`** -- Constructor parameter values baked into the locking script.
+- **`fileName`** -- Optional file name for error messages.
+- **`compileOptions`** -- Optional additional compiler options (merged with `fileName` and `constructorArgs`).
+
+Throws if compilation fails, with a message containing all error diagnostics.
+
+```typescript
+const src = readFileSync('./contracts/Arithmetic.runar.ts', 'utf8');
+const contract = ScriptExecutionContract.fromSource(
+  src,
+  { target: 27n },
+  'Arithmetic.runar.ts',
+);
+```
+
+### `execute()`
+
+Executes a public method against the compiled locking script. For pure-computation contracts that do not use `checkSig` or `checkPreimage`.
+
+```typescript
+execute(methodName: string, args: unknown[]): ScriptExecResult
+```
+
+- **`methodName`** -- The name of the public method to call.
+- **`args`** -- Positional arguments matching the method's parameter list.
+
+Returns a `ScriptExecResult`:
+
+```typescript
+interface ScriptExecResult {
+  success: boolean;
+  error?: string;
+}
+```
+
+Example:
+
+```typescript
+const result = contract.execute('verify', [3n, 7n]);
+expect(result.success).toBe(true);
+```
+
+Arguments are encoded to Bitcoin Script push data based on the ABI parameter types. If a contract has multiple public methods, a method selector index is automatically pushed onto the unlocking script.
+
+### `executeSigned()`
+
+Executes a method that requires a real `OP_CHECKSIG` by constructing a transaction context with a valid DER signature.
+
+```typescript
+executeSigned(
+  methodName: string,
+  args: unknown[],
+  sigArgIndex: number,
+  privateKey: PrivateKey,
+): ScriptExecResult
+```
+
+- **`methodName`** -- The name of the public method.
+- **`args`** -- Positional arguments. The entry at `sigArgIndex` is a placeholder that will be replaced with the computed signature.
+- **`sigArgIndex`** -- The index in `args` where the signature should be inserted.
+- **`privateKey`** -- A `PrivateKey` from `@bsv/sdk` used to produce the signature.
+
+The method builds a BIP-143 sighash preimage with `SIGHASH_ALL | SIGHASH_FORKID`, signs it with the private key, and creates a `Spend` with the same transaction context so that `OP_CHECKSIG` succeeds.
+
+```typescript
+import { PrivateKey } from '@bsv/sdk';
+
+const pk = new PrivateKey('aa'.repeat(32), 16);
+const pubKeyHash = ScriptExecutionContract.pubKeyHashHex(pk);
+
+const contract = ScriptExecutionContract.fromSource(src, {
+  ownerPKH: pubKeyHash,
+});
+
+const pubKey = ScriptExecutionContract.pubKeyHex(pk);
+const result = contract.executeSigned(
+  'unlock',
+  ['placeholder', pubKey],  // sig placeholder at index 0
+  0,                          // sigArgIndex
+  pk,
+);
+expect(result.success).toBe(true);
+```
+
+### Static Helpers
+
+**`ScriptExecutionContract.pubKeyHex(privateKey: PrivateKey): string`**
+
+Returns the compressed public key as a hex string for the given private key.
+
+**`ScriptExecutionContract.pubKeyHashHex(privateKey: PrivateKey): string`**
+
+Returns the `hash160` (RIPEMD-160 of SHA-256) of the compressed public key as a hex string. Useful for constructing P2PKH-style constructor arguments.
+
+### Supported Argument Types
+
+The following ABI parameter types are supported for argument encoding:
+
+| ABI Type | TypeScript Type | Encoding |
+|----------|----------------|----------|
+| `bigint` | `bigint` or `number` | Script number (minimally encoded) |
+| `boolean` | `boolean` | `OP_1` (true) or `OP_0` (false) |
+| `ByteString` | `string` (hex) | Push data |
+| `PubKey` | `string` (hex) | Push data |
+| `Sig` | `string` (hex) | Push data |
+| `Sha256` | `string` (hex) | Push data |
+| `Ripemd160` | `string` (hex) | Push data |
+| `Addr` | `string` (hex) | Push data |
+| `SigHashPreimage` | `string` (hex) | Push data |
+
+---
+
+## RunarInterpreter
+
+`RunarInterpreter` is a definitional interpreter that directly executes the Runar AST without compiling to Bitcoin Script. It serves as a **semantic oracle**: given the same inputs, the interpreter and the compiled Bitcoin Script should produce equivalent results. This makes it invaluable for differential testing and AST-level analysis.
+
+Imported from `runar-testing`:
+
+```typescript
+import { RunarInterpreter } from 'runar-testing';
+import type { RunarValue, InterpreterResult } from 'runar-testing';
+```
+
+### Value Types
+
+The interpreter operates on `RunarValue`, a tagged union:
+
+```typescript
+type RunarValue =
+  | { kind: 'bigint'; value: bigint }
+  | { kind: 'boolean'; value: boolean }
+  | { kind: 'bytes'; value: Uint8Array }
+  | { kind: 'void' };
+```
+
+### Constructor
+
+```typescript
+constructor(properties: Record<string, RunarValue>)
+```
+
+Creates an interpreter instance with the given contract properties (constructor state).
+
+```typescript
+const interp = new RunarInterpreter({
+  threshold: { kind: 'bigint', value: 100n },
+  owner: { kind: 'bytes', value: new Uint8Array([0x02, ...]) },
+});
+```
+
+### `executeMethod()`
+
+Executes a public method on a parsed Runar contract AST.
+
+```typescript
+executeMethod(
+  contract: ContractNode,
+  methodName: string,
+  args: Record<string, RunarValue>,
+): InterpreterResult
+```
+
+- **`contract`** -- The parsed `ContractNode` (Runar AST).
+- **`methodName`** -- Name of the public method to execute.
+- **`args`** -- Method arguments as a name-to-value map.
+
+Returns an `InterpreterResult`:
+
+```typescript
+interface InterpreterResult {
+  success: boolean;
+  error?: string;
+  returnValue?: RunarValue;
+}
+```
+
+When `success` is `false`, `error` contains the reason -- typically a failed assert or an undefined variable.
+
+```typescript
+import type { ContractNode } from 'runar-ir-schema';
+
+// `contract` is a parsed ContractNode from the Runar compiler
+const result = interp.executeMethod(contract, 'verify', {
+  a: { kind: 'bigint', value: 5n },
+  b: { kind: 'bigint', value: 3n },
+});
+
+expect(result.success).toBe(true);
+```
+
+### State and Output Management
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `setContract` | `(contract: ContractNode): void` | Stores a contract reference on the interpreter instance. |
+| `setMockPreimage` | `(overrides: Record<string, bigint>): void` | Override mock preimage fields (`locktime`, `amount`, `version`, `sequence`). |
+| `setMockPreimageBytes` | `(overrides: Record<string, Uint8Array>): void` | Override mock preimage byte fields. |
+| `resetOutputs` | `(): void` | Clears the accumulated output list. |
+| `getOutputs` | `(): { satoshis: RunarValue; stateValues: Record<string, RunarValue> }[]` | Returns a copy of the outputs created during execution. |
+| `getState` | `(): Record<string, RunarValue>` | Returns the current property state of the interpreter. |
+
+### What the Interpreter Supports
+
+The interpreter handles the full Runar expression language:
+
+- **Literals**: `bigint_literal`, `bool_literal`, `bytestring_literal`
+- **Variables**: `identifier`, `property_access`
+- **Operators**: all `binary_expr` operators (`+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `&`, `|`, `^`, `<<`, `>>`) and `unary_expr` operators (`-`, `!`, `~`)
+- **Control flow**: `if_statement`, `for_statement`, `return_statement`, `ternary_expr`
+- **Calls**: `call_expr` for builtins (`checkSig`, `checkMultiSig`, `sha256`, `hash256`, `hash160`, `ripemd160`, `num2bin`, `bin2num`, `cat`, `substr`, `reverseBytes`, `len`, `abs`, `min`, `max`, `within`)
+- **Indexing**: `index_access` for byte indexing, `member_expr` for `.length`
+- **Mutation**: `increment_expr`, `decrement_expr`, `assignment` (to variables and properties)
+- **Crypto**: real hash computations (`sha256`, `hash256`, `hash160`, `ripemd160`); real verification for WOTS, SLH-DSA, ECDSA, and Rabin signatures; `checkSig` and `checkMultiSig` return `true` (mocked)
+
+---
+
+## computeNewState()
+
+`computeNewState()` is a lightweight ANF interpreter that walks the compiled artifact's ANF IR to compute state transitions. The SDK uses it internally to auto-compute `newState` for stateful contract calls so callers do not need to duplicate contract logic.
+
+Imported from `runar-sdk`:
+
+```typescript
+import { computeNewState } from 'runar-sdk';
+```
+
+### Signature
+
+```typescript
+function computeNewState(
+  anf: ANFProgram,
+  methodName: string,
+  currentState: Record<string, unknown>,
+  args: Record<string, unknown>,
+): Record<string, unknown>
+```
+
+- **`anf`** -- The `ANFProgram` from the compiled artifact (`artifact.anf`).
+- **`methodName`** -- The public method to execute. Throws if not found.
+- **`currentState`** -- Current contract state as a property-name-to-value map.
+- **`args`** -- Method arguments as a parameter-name-to-value map. Implicit parameters (`_changePKH`, `_changeAmount`, `_newAmount`, `txPreimage`) are automatically skipped.
+
+Returns the **merged state**: `{ ...currentState, ...stateDelta }`, where `stateDelta` contains only the properties that changed.
+
+### Example
+
+```typescript
+import { computeNewState } from 'runar-sdk';
+
+// artifact.anf is the ANF IR from a compiled Counter contract
+const newState = computeNewState(
+  artifact.anf,
+  'increment',
+  { count: 5n },
+  {},  // increment takes no user-facing args
+);
+
+expect(newState.count).toBe(6n);
+```
+
+### Supported ANF Operations
+
+The interpreter handles the following ANF value kinds:
+
+| ANF Kind | Behavior |
+|----------|----------|
+| `load_param` | Loads a method parameter from the environment |
+| `load_prop` | Loads a contract property from the environment |
+| `load_const` | Returns the constant value; handles `@ref:name` aliases |
+| `bin_op` | Arithmetic (`+`, `-`, `*`, `/`, `%`), comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), logical (`&&`, `\|\|`), bitwise (`&`, `\|`, `^`, `<<`, `>>`); supports both numeric and byte-string operands |
+| `unary_op` | Negation (`-`), logical not (`!`), bitwise not (`~`) |
+| `call` | Built-in functions (see below) |
+| `method_call` | Private method calls -- executes the method body from the ANF, propagates state changes |
+| `if` | Conditional branching |
+| `loop` | Bounded iteration with an iteration variable |
+| `assert` | Skipped (on-chain script handles enforcement) |
+| `update_prop` | Updates a property in the state delta |
+| `add_output` | Extracts state changes from `stateValues` array, mapping to mutable properties by declaration order |
+
+### Skipped (On-Chain Only) Operations
+
+These operations are no-ops in the simulator because they only have meaning during on-chain script execution:
+
+- `check_preimage`
+- `deserialize_state`
+- `get_state_script`
+- `add_raw_output`
+
+### Built-in Functions
+
+The `call` kind delegates to these built-in functions:
+
+| Category | Functions | Behavior |
+|----------|-----------|----------|
+| **Crypto (mocked)** | `checkSig`, `checkMultiSig`, `checkPreimage` | Always return `true` |
+| **Crypto (real)** | `sha256`, `hash256`, `hash160`, `ripemd160` | Real hash computations via `@bsv/sdk` |
+| **Byte ops** | `num2bin`, `bin2num`, `cat`, `substr`, `reverseBytes`, `len` | Real implementations on hex strings |
+| **Math** | `abs`, `min`, `max`, `within`, `safediv`, `safemod`, `clamp`, `sign`, `pow`, `sqrt`, `gcd`, `divmod`, `log2`, `bool`, `mulDiv`, `percentOf` | BigInt arithmetic |
+| **Preimage intrinsics** | `extractOutputHash`, `extractAmount` | Return dummy values (`'00'.repeat(32)`) |
+
+### How the SDK Uses computeNewState
+
+When calling a stateful contract method through the SDK, `computeNewState` is invoked automatically if the artifact contains ANF IR:
+
+```typescript
+// Inside the SDK's Contract class (simplified)
+if (this.artifact.anf) {
+  const computed = computeNewState(
+    this.artifact.anf,
+    methodName,
+    this._state,
+    namedArgs,
+  );
+  this._state = { ...this._state, ...computed };
+}
+```
+
+This means you typically do not need to call `computeNewState` directly -- the SDK handles state prediction transparently. Direct use is helpful when you need to predict state changes in isolation, for example in a test harness or a UI that previews state transitions before broadcasting.

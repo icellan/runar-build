@@ -61,7 +61,7 @@ Error: Public methods must return void.
   --> Calculator.runar.ts:10:3
 ```
 
-**Cause:** Public contract methods (`public` methods) are spending conditions. They either succeed (all asserts pass) or fail. They do not return values. Only the `@method` decorator on non-public helper methods can return values, and those values must be on-chain types.
+**Cause:** Public contract methods are spending conditions. They either succeed (all asserts pass) or fail. They do not return values. Private helper methods (methods without the `public` keyword) can return on-chain types and are inlined at call sites by the compiler.
 
 **Solution:** Remove the return type and return statement from public methods. Use `assert()` to enforce conditions instead.
 
@@ -87,7 +87,7 @@ Source: PriceBet.runar.ts:24 assert(verifyRabinSig(...))
 
 **Cause:** An `assert()` call evaluated to `false` during script execution. This is the most common runtime error -- it means a spending condition was not met.
 
-**Solution:** Check the inputs you are passing to the contract method. Use `--verbose` test output or the script debugger to inspect the stack at the point of failure. Common causes include incorrect signatures, wrong public keys, or state values that do not match expectations.
+**Solution:** Check the inputs you are passing to the contract method. Run `runar test --verbose` to see source-mapped error output showing which `assert()` failed and at which line, or use `runar debug` to step through execution and inspect the stack at the failing opcode. Common causes include incorrect signatures, wrong public keys, or state values that do not match expectations.
 
 ### Stack Overflow
 
@@ -122,23 +122,7 @@ Error: Insufficient funds. Required: 15000 satoshis, available: 8000 satoshis.
 **Solution:** Fund your wallet with more testnet/mainnet coins. You can estimate the required amount with:
 
 ```bash
-runar deploy ./artifacts/MyContract.json --network testnet --dry-run
-```
-
-The `--dry-run` flag prints the estimated cost without broadcasting.
-
-### Invalid Network
-
-```
-Error: Invalid network 'mainnet'. Artifact was compiled for 'testnet'.
-```
-
-**Cause:** The compiled artifact includes a network binding. Deploying to a different network than the one specified at compile time is rejected as a safety measure.
-
-**Solution:** Recompile for the target network:
-
-```bash
-runar compile contracts/MyContract.runar.ts --network mainnet --output ./artifacts
+runar deploy ./artifacts/MyContract.json --network testnet
 ```
 
 ### Transaction Rejected by Network
@@ -165,7 +149,7 @@ Error: Transaction broadcast timed out after 30s. The transaction may still be p
 **Solution:** Check the transaction status using the TxID:
 
 ```bash
-runar verify <txid> --network testnet --status-only
+runar verify <txid> --network testnet
 ```
 
 If the transaction was not accepted, inspect the error and retry.
@@ -203,7 +187,7 @@ Error: Transaction rejected: txn-mempool-conflict. Input already spent in mempoo
 **Solution:** Refresh your UTXO set and select a different input. If you are managing state transitions on a stateful contract, ensure you are using the latest UTXO:
 
 ```typescript
-const contract = await RunarContract.fromTxId(latestTxId, provider);
+const contract = await RunarContract.fromTxId(artifact, latestTxId, 0, provider);
 ```
 
 ## Environment and Configuration Issues
@@ -211,7 +195,7 @@ const contract = await RunarContract.fromTxId(latestTxId, provider);
 ### Missing Compiler Binary
 
 ```
-Error: runar-compiler not found. Ensure @aspect-build/runar-compiler is installed.
+Error: runar-compiler not found. Ensure runar-compiler is installed.
 ```
 
 **Cause:** The compiler binary is not in your PATH or not installed as a project dependency.
@@ -227,16 +211,6 @@ Or install globally:
 ```bash
 pnpm add -g runar-cli
 ```
-
-### Invalid Configuration File
-
-```
-Error: Invalid runar.config.ts: unknown option 'target'.
-```
-
-**Cause:** The configuration file contains an unrecognized option. This often happens after upgrading Runar to a new version where options have been renamed.
-
-**Solution:** Check the [CLI Reference](/docs/en/api-reference/cli-reference) for the current set of valid configuration options.
 
 ### Node.js Version Mismatch
 
@@ -257,9 +231,8 @@ nvm use 20
 
 | Error Type | First Step | Tool to Use |
 |-----------|-----------|-------------|
-| Compilation error | Read the compiler message and fix the source | `runar compile --verbose` |
-| Assert failure | Inspect which assert failed using source map | `runar test --verbose` or `runar debug` |
-| Stack overflow | Simplify contract logic | Script debugger with `stack` command |
-| Deployment failure | Check wallet balance and network config | `runar deploy --dry-run` |
+| Compilation error | Read the compiler message and fix the source | `runar compile` |
+| Assert failure | Inspect which assert failed using source map | `runar debug` |
+| Stack overflow | Simplify contract logic, reduce intermediate values | `runar compile --asm` |
+| Deployment failure | Check wallet balance and network config | `runar deploy` |
 | Transaction rejection | Verify artifact matches on-chain | `runar verify` |
-| Configuration issue | Check versions and config file | `runar --version`, check `runar.config.ts` |

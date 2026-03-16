@@ -47,7 +47,7 @@ const contract2 = TestContract.fromFile(
 );
 ```
 
-**`TestContract.fromSource(source, initialState?, fileHint?)`** -- Compiles the given source string. The optional `initialState` object sets constructor parameters or `@state` fields. The optional `fileHint` string is used in error messages to identify the source file.
+**`TestContract.fromSource(source, initialState?, fileHint?)`** -- Compiles the given source string. The optional `initialState` object sets constructor parameters and initial state field values. The optional `fileHint` string is used in error messages to identify the source file.
 
 **`TestContract.fromFile(path, initialState?)`** -- Reads the file at `path` and compiles it. Equivalent to calling `fromSource` with `readFileSync` and passing the path as `fileHint`.
 
@@ -71,7 +71,7 @@ The return value is an object with the following shape:
 {
   success: boolean;    // true if all asserts passed and script executed cleanly
   error?: string;      // human-readable error message if success is false
-  outputs?: any[];     // values left on the stack after execution
+  outputs?: OutputSnapshot[];  // output snapshots: { satoshis: bigint; [key: string]: unknown }
 }
 ```
 
@@ -200,97 +200,90 @@ describe('Counter', () => {
 
 ## Testing in Go
 
-Go contracts use the standard `testing` package. The `runar` Go module provides `Assert()` and `CompileCheck()` helpers:
+Go contracts are tested using native Go structs for business logic and `runar.CompileCheck()` for compilation verification:
 
 ```go
-package mycontract
+package counter_test
 
 import (
     "testing"
-    "runar"
+    runar "github.com/icellan/runar/packages/runar-go"
 )
 
-func TestP2PKH_Unlock(t *testing.T) {
-    contract := runar.NewTestContract("P2PKH", runar.State{
-        "pubKeyHash": "ab".repeat(20),
-    })
-
-    result := contract.Call("unlock", runar.Args{
-        "sig":    runar.MockSig(),
-        "pubKey": runar.MockPubKey(),
-    })
-
-    runar.Assert(result.Success, "unlock should succeed")
+func TestCounter_Increment(t *testing.T) {
+    c := &Counter{Count: 0}
+    c.Increment()
+    if c.Count != 1 {
+        t.Errorf("expected 1, got %d", c.Count)
+    }
 }
 
-func TestP2PKH_CompileCheck(t *testing.T) {
-    err := runar.CompileCheck("./P2PKH.runar.go")
-    if err != nil {
-        t.Fatalf("compilation failed: %v", err)
+func TestCounter_Compile(t *testing.T) {
+    if err := runar.CompileCheck("Counter.runar.go"); err != nil {
+        t.Fatalf("compile check failed: %v", err)
     }
 }
 ```
 
-`runar.Assert()` panics on failure with a descriptive message, which Go's test runner catches and reports as a test failure.
+Business logic tests run the contract as native Go code with mock types from the `runar` package (`checkSig` always returns true, etc.). `CompileCheck()` runs the contract through the Runar frontend (parse, validate, typecheck) to verify it compiles to valid Bitcoin Script.
 
 ## Testing in Rust
 
-Rust contracts use the standard `#[test]` attribute and `#[should_panic]` for expected failures:
+Rust contracts are tested using native Rust structs for business logic and `runar::compile_check()` for compilation verification:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use runar::{TestContract, compile_check, mock_sig, mock_pubkey};
+#[path = "Counter.runar.rs"]
+mod contract;
+use contract::*;
 
-    #[test]
-    fn test_p2pkh_unlock() {
-        let contract = TestContract::from_file(
-            "./P2PKH.runar.rs",
-            vec![("pubKeyHash", "ab".repeat(20))],
-        );
-        let result = contract.call("unlock", vec![
-            ("sig", mock_sig()),
-            ("pubKey", mock_pubkey()),
-        ]);
-        assert!(result.success);
-    }
+#[test]
+fn test_increment() {
+    let mut c = Counter { count: 0 };
+    c.increment();
+    assert_eq!(c.count, 1);
+}
 
-    #[test]
-    #[should_panic(expected = "assert failed")]
-    fn test_p2pkh_wrong_key() {
-        let contract = TestContract::from_file(
-            "./P2PKH.runar.rs",
-            vec![("pubKeyHash", "ab".repeat(20))],
-        );
-        let result = contract.call("unlock", vec![
-            ("sig", mock_sig()),
-            ("pubKey", mock_pubkey_different()),
-        ]);
-        result.expect_success();
-    }
+#[test]
+fn test_decrement_at_zero() {
+    let mut c = Counter { count: 0 };
+    // decrement asserts count > 0, so this should panic
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.decrement();
+    }));
+    assert!(result.is_err());
+}
 
-    #[test]
-    fn test_compile_check() {
-        compile_check("./P2PKH.runar.rs").unwrap();
-    }
+#[test]
+fn test_compile() {
+    runar::compile_check(include_str!("Counter.runar.rs"), "Counter.runar.rs").unwrap();
 }
 ```
+
+Business logic tests run the contract as native Rust code with mock types from the `runar` crate. `compile_check()` runs the source through the Runar frontend to verify it produces valid Bitcoin Script.
 
 ## Assertion Helpers for Script Evaluation
 
 Beyond the `result.success` boolean, `runar-testing` provides helpers for common assertion patterns:
 
 ```typescript
-import { expectSuccess, expectFailure, expectOutput } from 'runar-testing';
+import { TestSmartContract, expectScriptSuccess, expectScriptFailure, expectStackTop, expectStackTopNum } from 'runar-testing';
+
+// These helpers take a VMResult (from TestSmartContract or ScriptVM),
+// NOT a TestCallResult from TestContract.call().
+// Use TestSmartContract for low-level Script VM testing:
+const vm = TestSmartContract.fromSource(source);
+const result = vm.call('unlock', args);
 
 // Assert the call succeeds
-expectSuccess(contract.call('unlock', args));
+expectScriptSuccess(result);
 
 // Assert the call fails with a specific error
-expectFailure(contract.call('unlock', badArgs), 'checkSig');
+const badResult = vm.call('unlock', badArgs);
+expectScriptFailure(badResult);
 
-// Assert specific stack output values
-expectOutput(contract.call('compute', args), [42n, true]);
+// Assert specific stack output values (second arg is Uint8Array, not hex string)
+expectStackTop(result, new Uint8Array([1]));
+expectStackTopNum(result, 42n);
 ```
 
 These helpers produce clearer error messages than raw `expect` calls, including the full script execution trace when a test fails.

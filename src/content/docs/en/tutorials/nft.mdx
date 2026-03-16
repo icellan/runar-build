@@ -44,7 +44,7 @@ The contract methods:
 
 ## Writing the Contract
 
-Create `contracts/NFT.runar.ts`:
+Create `src/contracts/NFT.runar.ts`:
 
 ```typescript
 import {
@@ -79,7 +79,7 @@ class NFTExample extends StatefulSmartContract {
     this.owner = newOwner;
     this.addOutput(1n, this.tokenId, this.metadata, this.owner);
 
-    const expectedHash = hash256(this.buildStateOutput());
+    const expectedHash = hash256(this.getStateScript());
     assert(extractOutputHash(txPreimage) === expectedHash);
   }
 
@@ -115,7 +115,7 @@ public transfer(sig: Sig, newOwner: PubKey, txPreimage: SigHashPreimage) {
   this.owner = newOwner;
   this.addOutput(1n, this.tokenId, this.metadata, this.owner);
 
-  const expectedHash = hash256(this.buildStateOutput());
+  const expectedHash = hash256(this.getStateScript());
   assert(extractOutputHash(txPreimage) === expectedHash);
 }
 ```
@@ -152,32 +152,28 @@ Create `tests/NFT.test.ts`:
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('NFTExample', () => {
-  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
-  const bobKey = bsv.PrivateKey.fromRandom('testnet');
-  const alicePub = aliceKey.toPublicKey().toString();
-  const bobPub = bobKey.toPublicKey().toString();
+  const source = readFileSync('./src/contracts/NFT.runar.ts', 'utf-8');
 
   const tokenId = '0001';
   const metadata = Buffer.from(
     JSON.stringify({ name: 'Runar Genesis', description: 'First NFT' })
   ).toString('hex');
 
-  it('should transfer ownership to a new owner', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/NFT.runar.ts',
-      'NFTExample'
-    );
+  it('should transfer ownership to a new owner', () => {
+    const contract = TestContract.fromSource(source, {
+      tokenId,
+      metadata,
+      owner: ALICE.pubKey,
+    });
 
-    const instance = contract.create(tokenId, metadata, alicePub);
-
-    const result = await instance.call('transfer', {
-      sig: instance.sign(aliceKey),
-      newOwner: bobPub,
-      txPreimage: instance.getPreimage(),
+    const result = contract.call('transfer', {
+      sig: ALICE.privKey,
+      newOwner: BOB.pubKey,
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(true);
@@ -185,67 +181,63 @@ describe('NFTExample', () => {
     expect(result.outputs).toHaveLength(1);
   });
 
-  it('should reject transfer by non-owner', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/NFT.runar.ts',
-      'NFTExample'
-    );
-
-    const instance = contract.create(tokenId, metadata, alicePub);
+  it('should reject transfer by non-owner', () => {
+    const contract = TestContract.fromSource(source, {
+      tokenId,
+      metadata,
+      owner: ALICE.pubKey,
+    });
 
     // Bob tries to transfer Alice's NFT
-    const result = await instance.call('transfer', {
-      sig: instance.sign(bobKey),
-      newOwner: bobPub,
-      txPreimage: instance.getPreimage(),
+    const result = contract.call('transfer', {
+      sig: BOB.privKey,
+      newOwner: BOB.pubKey,
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should allow owner to burn the token', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/NFT.runar.ts',
-      'NFTExample'
-    );
+  it('should allow owner to burn the token', () => {
+    const contract = TestContract.fromSource(source, {
+      tokenId,
+      metadata,
+      owner: ALICE.pubKey,
+    });
 
-    const instance = contract.create(tokenId, metadata, alicePub);
-
-    const result = await instance.call('burn', {
-      sig: instance.sign(aliceKey),
+    const result = contract.call('burn', {
+      sig: ALICE.privKey,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject burn by non-owner', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/NFT.runar.ts',
-      'NFTExample'
-    );
+  it('should reject burn by non-owner', () => {
+    const contract = TestContract.fromSource(source, {
+      tokenId,
+      metadata,
+      owner: ALICE.pubKey,
+    });
 
-    const instance = contract.create(tokenId, metadata, alicePub);
-
-    const result = await instance.call('burn', {
-      sig: instance.sign(bobKey),
+    const result = contract.call('burn', {
+      sig: BOB.privKey,
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should preserve tokenId and metadata across transfers', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/NFT.runar.ts',
-      'NFTExample'
-    );
-
-    const instance = contract.create(tokenId, metadata, alicePub);
+  it('should preserve tokenId and metadata across transfers', () => {
+    const contract = TestContract.fromSource(source, {
+      tokenId,
+      metadata,
+      owner: ALICE.pubKey,
+    });
 
     // Transfer from Alice to Bob
-    const result = await instance.call('transfer', {
-      sig: instance.sign(aliceKey),
-      newOwner: bobPub,
-      txPreimage: instance.getPreimage(),
+    const result = contract.call('transfer', {
+      sig: ALICE.privKey,
+      newOwner: BOB.pubKey,
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(true);
@@ -277,10 +269,12 @@ const metadata = Buffer.from(JSON.stringify({
 
 **On-chain hash with off-chain data (large tokens):**
 ```typescript
+import { createHash } from 'crypto';
+
 // Store only the hash of the metadata; full data lives off-chain
-const metadataHash = bsv.crypto.Hash.sha256(
-  Buffer.from(JSON.stringify(fullMetadata))
-).toString('hex');
+const metadataHash = createHash('sha256')
+  .update(JSON.stringify(fullMetadata))
+  .digest('hex');
 ```
 
 Both approaches are valid. On-chain metadata is fully self-contained but costs more in transaction fees. Hash-only metadata is cheaper but requires an external service to resolve the full data.

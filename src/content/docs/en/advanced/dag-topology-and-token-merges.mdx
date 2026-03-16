@@ -38,8 +38,8 @@ Splitting is the simpler operation: a single token UTXO is spent in a transactio
 
 ```typescript
 class FungibleToken extends StatefulSmartContract {
-  @state amount: bigint;
-  @state ownerPubKey: PubKey;
+  amount: bigint;
+  readonly ownerPubKey: PubKey;
 
   public split(
     sig: Sig,
@@ -59,10 +59,10 @@ class FungibleToken extends StatefulSmartContract {
     // Build two outputs: one for the original owner, one for the new owner
     // Both outputs use the same token contract script with updated state
     const output1 = buildTokenOutput(
-      this.getScriptCode(), remainingAmount, this.ownerPubKey
+      this.getStateScript(), remainingAmount, this.ownerPubKey
     );
     const output2 = buildTokenOutput(
-      this.getScriptCode(), splitAmount, newOwner
+      this.getStateScript(), splitAmount, newOwner
     );
 
     // Verify the transaction creates exactly these outputs
@@ -87,8 +87,8 @@ The `hashPrevouts` field in the sighash preimage is a hash of all input outpoint
 
 ```typescript
 class MergeableToken extends StatefulSmartContract {
-  @state amount: bigint;
-  @state ownerPubKey: PubKey;
+  amount: bigint;
+  readonly ownerPubKey: PubKey;
 
   public merge(
     sig: Sig,
@@ -118,7 +118,7 @@ class MergeableToken extends StatefulSmartContract {
     // Build the merged output with combined amount
     const mergedAmount = this.amount + otherAmount;
     const output = buildTokenOutput(
-      this.getScriptCode(), mergedAmount, this.ownerPubKey
+      this.getStateScript(), mergedAmount, this.ownerPubKey
     );
     assert(hash256(output) === extractOutputHash(preimage));
   }
@@ -158,17 +158,15 @@ The `TokenWallet` class in the Runar SDK manages the complexity of the token DAG
 ```typescript
 import { TokenWallet, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
 
-const wallet = new TokenWallet({
-  tokenId: 'abc123...', // Minting transaction ID
-  provider: new WhatsOnChainProvider('mainnet'),
-  signer: new LocalSigner(privateKey),
-});
+const provider = new WhatsOnChainProvider('mainnet');
+const signer = new LocalSigner(privateKey);
+const wallet = new TokenWallet(artifact, provider, signer);
 
 // Check balance (sum of all owned token UTXOs)
 const balance = await wallet.getBalance();
 
 // Transfer tokens (automatically splits if needed)
-await wallet.transfer(recipientPubKey, 50n);
+await wallet.transfer(recipientAddr, 50n);
 
 // Get all owned UTXOs
 const utxos = await wallet.getUtxos();
@@ -181,9 +179,6 @@ Over time, a wallet may accumulate many small token UTXOs from receiving multipl
 ```typescript
 // Merge all owned UTXOs into a single UTXO
 await wallet.merge();
-
-// Merge only UTXOs below a threshold
-await wallet.merge({ minAmount: 100n });
 ```
 
 Automatic merging is important for two reasons:
@@ -207,11 +202,8 @@ The `TokenWallet` handles these cases by:
 3. Retrying failed transactions with updated inputs
 
 ```typescript
-// Safe transfer with automatic retry on UTXO conflict
-const result = await wallet.transfer(recipient, amount, {
-  retries: 3,
-  refreshBeforeRetry: true,
-});
+// Transfer with automatic retry on UTXO conflict
+const result = await wallet.transfer(recipientAddr, amount);
 ```
 
 ## Optimizing DAG Depth and Transaction Throughput

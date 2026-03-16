@@ -58,7 +58,7 @@ class Auction extends StatefulSmartContract {
       this.highBid
     );
 
-    const expectedHash = hash256(this.buildStateOutput());
+    const expectedHash = hash256(this.getStateScript());
     assert(extractOutputHash(txPreimage) === expectedHash);
   }
 
@@ -143,7 +143,7 @@ this.addOutput(amount, this.auctioneer, this.deadline, this.highBidder, this.hig
 Define the new auction UTXO. The satoshi amount is the bid amount (the actual funds being bid are locked in the UTXO). The state values are the full set of contract properties, including the updated bidder and bid.
 
 ```typescript
-const expectedHash = hash256(this.buildStateOutput());
+const expectedHash = hash256(this.getStateScript());
 assert(extractOutputHash(txPreimage) === expectedHash);
 ```
 
@@ -195,115 +195,91 @@ The `close` method does not check the deadline. The auctioneer can close at any 
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB, CHARLIE } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('Auction', () => {
-  const auctioneerKey = bsv.PrivateKey.fromRandom('testnet');
-  const bidder1Key = bsv.PrivateKey.fromRandom('testnet');
-  const bidder2Key = bsv.PrivateKey.fromRandom('testnet');
-  const auctioneerPub = auctioneerKey.toPublicKey().toString();
-  const bidder1Pub = bidder1Key.toPublicKey().toString();
-  const bidder2Pub = bidder2Key.toPublicKey().toString();
+  const source = readFileSync('./src/contracts/Auction.runar.ts', 'utf-8');
 
+  // ALICE = auctioneer, BOB = bidder1, CHARLIE = bidder2
   const deadline = 800000n; // Block height deadline
 
-  it('should accept a bid higher than current', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Auction.runar.ts',
-      'Auction'
-    );
-    const instance = contract.create(
-      auctioneerPub,
+  it('should accept a bid higher than current', () => {
+    const contract = TestContract.fromSource(source, {
+      auctioneer: ALICE.pubKey,
       deadline,
-      auctioneerPub,
-      1000n
-    );
+      highBidder: ALICE.pubKey,
+      highBid: 1000n,
+    });
 
-    const result = await instance.call('bid', {
-      bidder: bidder1Pub,
+    const result = contract.call('bid', {
+      bidder: BOB.pubKey,
       amount: 2000n,
-      txPreimage: instance.getPreimage({ locktime: 799000n }),
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject a bid lower than current', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Auction.runar.ts',
-      'Auction'
-    );
-    const instance = contract.create(
-      auctioneerPub,
+  it('should reject a bid lower than current', () => {
+    const contract = TestContract.fromSource(source, {
+      auctioneer: ALICE.pubKey,
       deadline,
-      bidder1Pub,
-      5000n
-    );
+      highBidder: BOB.pubKey,
+      highBid: 5000n,
+    });
 
-    const result = await instance.call('bid', {
-      bidder: bidder2Pub,
+    const result = contract.call('bid', {
+      bidder: CHARLIE.pubKey,
       amount: 3000n,
-      txPreimage: instance.getPreimage({ locktime: 799000n }),
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should reject a bid after deadline', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Auction.runar.ts',
-      'Auction'
-    );
-    const instance = contract.create(
-      auctioneerPub,
+  it('should reject a bid after deadline', () => {
+    const contract = TestContract.fromSource(source, {
+      auctioneer: ALICE.pubKey,
       deadline,
-      auctioneerPub,
-      1000n
-    );
+      highBidder: ALICE.pubKey,
+      highBid: 1000n,
+    });
 
-    const result = await instance.call('bid', {
-      bidder: bidder1Pub,
+    const result = contract.call('bid', {
+      bidder: BOB.pubKey,
       amount: 5000n,
-      txPreimage: instance.getPreimage({ locktime: 900000n }),
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should allow auctioneer to close', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Auction.runar.ts',
-      'Auction'
-    );
-    const instance = contract.create(
-      auctioneerPub,
+  it('should allow auctioneer to close', () => {
+    const contract = TestContract.fromSource(source, {
+      auctioneer: ALICE.pubKey,
       deadline,
-      bidder1Pub,
-      5000n
-    );
+      highBidder: BOB.pubKey,
+      highBid: 5000n,
+    });
 
-    const result = await instance.call('close', {
-      sig: instance.sign(auctioneerKey),
+    const result = contract.call('close', {
+      sig: ALICE.privKey,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject close by non-auctioneer', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Auction.runar.ts',
-      'Auction'
-    );
-    const instance = contract.create(
-      auctioneerPub,
+  it('should reject close by non-auctioneer', () => {
+    const contract = TestContract.fromSource(source, {
+      auctioneer: ALICE.pubKey,
       deadline,
-      bidder1Pub,
-      5000n
-    );
+      highBidder: BOB.pubKey,
+      highBid: 5000n,
+    });
 
-    const result = await instance.call('close', {
-      sig: instance.sign(bidder1Key),
+    const result = contract.call('close', {
+      sig: BOB.privKey,
     });
 
     expect(result.success).toBe(false);

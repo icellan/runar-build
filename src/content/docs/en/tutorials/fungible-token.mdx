@@ -47,7 +47,7 @@ The contract state consists of an `owner` (public key) and a `balance` (bigint).
 
 ## Writing the Contract
 
-Create `contracts/FungibleToken.runar.ts`:
+Create `src/contracts/FungibleToken.runar.ts`:
 
 ```typescript
 import {
@@ -88,7 +88,7 @@ class FungibleTokenExample extends StatefulSmartContract {
     this.addOutput(1n, this.owner, this.balance);
     this.addOutput(1n, newOwner, amount);
 
-    const expectedHash = hash256(this.buildStateOutput());
+    const expectedHash = hash256(this.getStateScript());
     assert(extractOutputHash(txPreimage) === expectedHash);
   }
 
@@ -103,7 +103,7 @@ class FungibleTokenExample extends StatefulSmartContract {
 
     this.addOutput(1n, this.owner, this.balance);
 
-    const expectedHash = hash256(this.buildStateOutput());
+    const expectedHash = hash256(this.getStateScript());
     assert(extractOutputHash(txPreimage) === expectedHash);
   }
 }
@@ -189,11 +189,11 @@ Update the state and define the outputs:
 The `1n` is the satoshi amount for each output (1 satoshi, the minimum). The remaining arguments define the state serialized into each output.
 
 ```typescript
-const expectedHash = hash256(this.buildStateOutput());
+const expectedHash = hash256(this.getStateScript());
 assert(extractOutputHash(txPreimage) === expectedHash);
 ```
 
-The covenant enforcement: `buildStateOutput()` serializes the outputs defined by `addOutput` calls. `extractOutputHash(txPreimage)` extracts the hash of the transaction's actual outputs from the preimage. By asserting they are equal, the contract guarantees the spending transaction creates exactly the outputs the contract specified. The spender cannot redirect tokens elsewhere.
+The covenant enforcement: `getStateScript()` serializes the outputs defined by `addOutput` calls. `extractOutputHash(txPreimage)` extracts the hash of the transaction's actual outputs from the preimage. By asserting they are equal, the contract guarantees the spending transaction creates exactly the outputs the contract specified. The spender cannot redirect tokens elsewhere.
 
 #### The `send` Method
 
@@ -215,7 +215,7 @@ public merge(sig: Sig, txPreimage: SigHashPreimage) {
 
   this.addOutput(1n, this.owner, this.balance);
 
-  const expectedHash = hash256(this.buildStateOutput());
+  const expectedHash = hash256(this.getStateScript());
   assert(extractOutputHash(txPreimage) === expectedHash);
 }
 ```
@@ -236,30 +236,25 @@ Create `tests/FungibleToken.test.ts`:
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('FungibleTokenExample', () => {
-  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
-  const bobKey = bsv.PrivateKey.fromRandom('testnet');
-  const alicePub = aliceKey.toPublicKey().toString();
-  const bobPub = bobKey.toPublicKey().toString();
+  const source = readFileSync('./src/contracts/FungibleToken.runar.ts', 'utf-8');
 
-  it('should transfer tokens to a new owner', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/FungibleToken.runar.ts',
-      'FungibleTokenExample'
-    );
-
+  it('should transfer tokens to a new owner', () => {
     // Alice starts with 100 tokens
-    const instance = contract.create(alicePub, 100n);
+    const contract = TestContract.fromSource(source, {
+      owner: ALICE.pubKey,
+      balance: 100n,
+    });
 
     // Transfer 30 tokens to Bob
-    const result = await instance.call('transfer', {
-      sig: instance.sign(aliceKey),
+    const result = contract.call('transfer', {
+      sig: ALICE.privKey,
       amount: 30n,
-      newOwner: bobPub,
-      txPreimage: instance.getPreimage(),
+      newOwner: BOB.pubKey,
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(true);
@@ -267,54 +262,48 @@ describe('FungibleTokenExample', () => {
     expect(result.outputs).toHaveLength(2);
   });
 
-  it('should reject transfer exceeding balance', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/FungibleToken.runar.ts',
-      'FungibleTokenExample'
-    );
+  it('should reject transfer exceeding balance', () => {
+    const contract = TestContract.fromSource(source, {
+      owner: ALICE.pubKey,
+      balance: 50n,
+    });
 
-    const instance = contract.create(alicePub, 50n);
-
-    const result = await instance.call('transfer', {
-      sig: instance.sign(aliceKey),
+    const result = contract.call('transfer', {
+      sig: ALICE.privKey,
       amount: 100n,
-      newOwner: bobPub,
-      txPreimage: instance.getPreimage(),
+      newOwner: BOB.pubKey,
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should reject transfer with wrong signature', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/FungibleToken.runar.ts',
-      'FungibleTokenExample'
-    );
-
-    const instance = contract.create(alicePub, 100n);
+  it('should reject transfer with wrong signature', () => {
+    const contract = TestContract.fromSource(source, {
+      owner: ALICE.pubKey,
+      balance: 100n,
+    });
 
     // Bob tries to transfer Alice's tokens
-    const result = await instance.call('transfer', {
-      sig: instance.sign(bobKey),
+    const result = contract.call('transfer', {
+      sig: BOB.privKey,
       amount: 50n,
-      newOwner: bobPub,
-      txPreimage: instance.getPreimage(),
+      newOwner: BOB.pubKey,
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should allow owner to send entire balance', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/FungibleToken.runar.ts',
-      'FungibleTokenExample'
-    );
+  it('should allow owner to send entire balance', () => {
+    const contract = TestContract.fromSource(source, {
+      owner: ALICE.pubKey,
+      balance: 100n,
+    });
 
-    const instance = contract.create(alicePub, 100n);
-
-    const result = await instance.call('send', {
-      sig: instance.sign(aliceKey),
-      txPreimage: instance.getPreimage(),
+    const result = contract.call('send', {
+      sig: ALICE.privKey,
+      txPreimage: 'auto',
     });
 
     expect(result.success).toBe(true);
@@ -368,7 +357,7 @@ The `--satoshis 1` is the dust amount for the UTXO. The token's value is tracked
 | `checkPreimage` | Verifies the preimage matches the current transaction |
 | `extractOutputHash` | Extracts the hash of actual outputs from the preimage |
 | `addOutput` | Defines required outputs in the spending transaction |
-| `buildStateOutput` | Serializes all outputs defined by `addOutput` calls |
+| `getStateScript` | Serializes all outputs defined by `addOutput` calls |
 | UTXO token model | Each balance is a separate UTXO; transfers create new UTXOs |
 
 ## What's Next

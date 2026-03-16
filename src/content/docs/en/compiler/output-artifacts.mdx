@@ -6,7 +6,7 @@ order: 40
 lang: "en"
 ---
 
-After compilation, Runar produces a JSON artifact file that contains everything needed to deploy and interact with the contract. This page explains the artifact format in detail.
+After compilation, Rúnar produces a JSON artifact file that contains everything needed to deploy and interact with the contract: the compiled Bitcoin Script, the ABI (constructor parameters and public methods), optional IR and ASM output, and metadata for state management.
 
 ## Artifact File Overview
 
@@ -35,19 +35,19 @@ Here is the full structure of an artifact file with every field documented:
         "params": [
           { "name": "sig", "type": "Sig" },
           { "name": "pubKey", "type": "PubKey" }
-        ]
+        ],
+        "isPublic": true
       }
     ]
   },
   "script": "76a914OP_0_PLACEHOLDER_0088ac",
   "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
   "sourceMap": {
-    "file": "P2PKH.runar.ts",
     "mappings": [
-      { "opcodeOffset": 0, "line": 12, "column": 4 },
-      { "opcodeOffset": 1, "line": 12, "column": 4 },
-      { "opcodeOffset": 3, "line": 12, "column": 25 },
-      { "opcodeOffset": 5, "line": 13, "column": 4 }
+      { "opcodeIndex": 0, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 4 },
+      { "opcodeIndex": 1, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 4 },
+      { "opcodeIndex": 3, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 25 },
+      { "opcodeIndex": 5, "sourceFile": "P2PKH.runar.ts", "line": 13, "column": 4 }
     ]
   },
   "ir": {
@@ -67,10 +67,8 @@ Here is the full structure of an artifact file with every field documented:
   "stateFields": [],
   "constructorSlots": [
     {
-      "name": "pubKeyHash",
-      "type": "Ripemd160",
-      "byteOffset": 3,
-      "byteLength": 20
+      "paramIndex": 0,
+      "byteOffset": 3
     }
   ],
   "buildTimestamp": "2026-03-15T10:30:00Z"
@@ -100,6 +98,8 @@ The `abi` field describes the contract's interface -- its constructor parameters
 **`abi.methods`** (array) -- Public methods. Each entry has:
 - `name` (string) -- Method name.
 - `params` (array) -- Method parameters, same format as constructor params.
+- `isPublic` (boolean) -- Whether the method is public.
+- `isTerminal` (boolean, optional) -- Whether the method terminates the contract (no continuation UTXO).
 
 For contracts with multiple public methods, the methods array contains all of them. The method index in this array corresponds to the dispatch table index in the compiled script.
 
@@ -107,7 +107,7 @@ For contracts with multiple public methods, the methods array contains all of th
 
 **`script`** (string) -- The compiled Bitcoin Script as a hex string. Constructor parameter positions contain `OP_0` placeholders (represented as `OP_0_PLACEHOLDER_XX` where `XX` is the slot index). The SDK replaces these placeholders with actual values at deployment time.
 
-**`asm`** (string, optional) -- Human-readable Bitcoin Script assembly. Only included when the `--asm` flag is used or `includeASM` is set in the config. Constructor parameters appear as `<paramName>` placeholders.
+**`asm`** (string) -- Human-readable Bitcoin Script assembly. Always present in the artifact. Constructor parameters appear as `<paramName>` placeholders.
 
 The assembly format is useful for debugging and auditing. Each opcode is separated by a space, and data pushes show the placeholder name in angle brackets.
 
@@ -115,20 +115,19 @@ The assembly format is useful for debugging and auditing. Each opcode is separat
 
 **`sourceMap`** (object) -- Maps compiled opcodes back to source code positions. Used by debugging tools to show which line of source code produced a given opcode.
 
-**`sourceMap.file`** (string) -- The source file name.
-
-**`sourceMap.mappings`** (array) -- Each entry maps an opcode offset to a source position:
-- `opcodeOffset` (number) -- Byte offset in the compiled script.
+**`sourceMap.mappings`** (array) -- Each entry maps an opcode index to a source position:
+- `opcodeIndex` (number) -- Index of the opcode in the compiled script.
+- `sourceFile` (string) -- The source file name for this mapping entry.
 - `line` (number) -- Source line number (1-based).
 - `column` (number) -- Source column number (0-based).
 
-The source map enables the Runar debugger to step through Bitcoin Script execution while showing the corresponding source code.
+The source map is used by the interactive debugger (`runar debug`) and verbose test output to show which source line corresponds to the currently executing opcode or a script failure.
 
 ### Intermediate Representation
 
 **`ir`** (object, optional) -- The ANF intermediate representation. Only included when the `--ir` flag is used or `includeIR` is set in the config.
 
-**`ir.methods`** (array) -- Each method's ANF as an array of string-formatted instructions. This is the exact representation that serves as the conformance boundary across compiler implementations.
+The IR is a structured `ANFProgram` object with `contractName`, `properties`, and `methods`. This is the exact representation that serves as the conformance boundary across compiler implementations.
 
 Including the IR in the artifact enables cross-compiler verification: you can compile the same contract with the TypeScript and Go compilers, and compare the `ir` fields to confirm they match.
 
@@ -139,6 +138,8 @@ Including the IR in the artifact enables cross-compiler verification: you can co
 Each entry has:
 - `name` (string) -- Field name.
 - `type` (string) -- Runar type.
+- `index` (number) -- Position index of the state field.
+- `initialValue` (string, optional) -- Initial value if one is declared in the source.
 
 For stateless contracts (`SmartContract`), this array is empty.
 
@@ -146,7 +147,7 @@ Example for a `Counter` contract:
 
 ```json
 "stateFields": [
-  { "name": "count", "type": "bigint" }
+  { "name": "count", "type": "bigint", "index": 0, "initialValue": "0" }
 ]
 ```
 
@@ -155,12 +156,10 @@ Example for a `Counter` contract:
 **`constructorSlots`** (array) -- Describes where constructor parameter placeholders appear in the compiled script. The SDK uses this information to splice actual values into the script at deployment time.
 
 Each entry has:
-- `name` (string) -- Parameter name (matches `abi.constructor.params`).
-- `type` (string) -- Parameter type.
+- `paramIndex` (number) -- Index into `abi.constructor.params` identifying the parameter.
 - `byteOffset` (number) -- Byte position in the hex script where the placeholder starts.
-- `byteLength` (number) -- Expected byte length of the parameter value.
 
-The SDK reads the `constructorSlots` array, takes the constructor arguments provided by the user, serializes each argument to the correct byte length, and replaces the placeholder bytes in the script.
+The SDK reads the `constructorSlots` array, takes the constructor arguments provided by the user, serializes each argument, and replaces the placeholder bytes in the script.
 
 ## Example: Complete P2PKH Artifact
 
@@ -183,19 +182,19 @@ Here is a real-world artifact for a P2PKH contract, with the `--ir` and `--asm` 
         "params": [
           { "name": "sig", "type": "Sig" },
           { "name": "pubKey", "type": "PubKey" }
-        ]
+        ],
+        "isPublic": true
       }
     ]
   },
   "script": "76a91400000000000000000000000000000000000000008888ac",
   "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
   "sourceMap": {
-    "file": "P2PKH.runar.ts",
     "mappings": [
-      { "opcodeOffset": 0, "line": 12, "column": 4 },
-      { "opcodeOffset": 1, "line": 12, "column": 4 },
-      { "opcodeOffset": 3, "line": 12, "column": 25 },
-      { "opcodeOffset": 24, "line": 13, "column": 4 }
+      { "opcodeIndex": 0, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 4 },
+      { "opcodeIndex": 1, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 4 },
+      { "opcodeIndex": 3, "sourceFile": "P2PKH.runar.ts", "line": 12, "column": 25 },
+      { "opcodeIndex": 24, "sourceFile": "P2PKH.runar.ts", "line": 13, "column": 4 }
     ]
   },
   "ir": {
@@ -215,10 +214,8 @@ Here is a real-world artifact for a P2PKH contract, with the `--ir` and `--asm` 
   "stateFields": [],
   "constructorSlots": [
     {
-      "name": "pubKeyHash",
-      "type": "Ripemd160",
-      "byteOffset": 3,
-      "byteLength": 20
+      "paramIndex": 0,
+      "byteOffset": 3
     }
   ],
   "buildTimestamp": "2026-03-15T10:30:00Z"
@@ -245,13 +242,14 @@ For a stateful `Counter` contract that extends `StatefulSmartContract`, the arti
         "name": "increment",
         "params": [
           { "name": "preimage", "type": "SigHashPreimage" }
-        ]
+        ],
+        "isPublic": true
       }
     ]
   },
   "script": "...",
   "stateFields": [
-    { "name": "count", "type": "bigint" }
+    { "name": "count", "type": "bigint", "index": 0, "initialValue": "0" }
   ],
   "constructorSlots": [],
   "buildTimestamp": "2026-03-15T10:31:00Z"
@@ -268,9 +266,9 @@ The artifact JSON is the primary input to the `RunarContract` class:
 import { RunarContract } from 'runar-sdk';
 import artifact from './artifacts/P2PKH.json';
 
-const contract = new RunarContract(artifact, {
-  pubKeyHash: '89abcdef01234567890abcdef01234567890abcd',
-});
+const contract = new RunarContract(artifact, [
+  '89abcdef01234567890abcdef01234567890abcd',
+]);
 ```
 
 The SDK reads the `constructorSlots` to know where to insert the `pubKeyHash` value, reads the `abi` to validate method calls, and uses the `script` as the basis for the locking script.

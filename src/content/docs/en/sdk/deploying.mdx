@@ -35,9 +35,9 @@ Load the artifact and provide constructor arguments:
 import { RunarContract } from 'runar-sdk';
 import artifact from './artifacts/P2PKH.json';
 
-const contract = new RunarContract(artifact, {
-  pubKeyHash: '89abcdef01234567890abcdef01234567890abcd',
-});
+const contract = new RunarContract(artifact, [
+  '89abcdef01234567890abcdef01234567890abcd',
+]);
 ```
 
 ### How Constructor Arguments Work
@@ -47,37 +47,29 @@ The compiled script in the artifact contains `OP_0` placeholders at the position
 When you create a `RunarContract` instance:
 
 1. The SDK reads the `constructorSlots` array from the artifact.
-2. For each slot, it takes the corresponding constructor argument you provided.
+2. For each slot, it takes the corresponding constructor argument from the array you provided (matched by position).
 3. It serializes the argument to the expected byte length (e.g., a `Ripemd160` is 20 bytes).
 4. It splices the serialized bytes into the script at the recorded byte offset.
 
-The result is a fully resolved locking script with no placeholders. You can inspect it:
-
-```typescript
-const lockingScript = contract.getLockingScript();
-console.log(lockingScript);
-// "76a91489abcdef01234567890abcdef01234567890abcd88ac"
-```
+The result is a fully resolved locking script with no placeholders.
 
 ### Contracts Without Constructor Arguments
 
-Some contracts have no constructor parameters (e.g., a stateful Counter that starts at zero). In that case, omit the second argument:
+Some contracts have no constructor parameters (e.g., a stateful Counter that starts at zero). Pass an empty array:
 
 ```typescript
-const counter = new RunarContract(counterArtifact);
+const counter = new RunarContract(counterArtifact, []);
 ```
 
 ## Step 3: Set Up Provider and Signer
 
-The provider connects to the BSV network and the signer produces signatures for your funding inputs.
+The provider connects to the BSV network and the signer produces signatures for your funding inputs. These are passed to `deploy()` and `call()` as arguments.
 
 ```typescript
 import { WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
 
 const provider = new WhatsOnChainProvider('testnet');
 const signer = new LocalSigner('cN3L4FfPtE7WjknM...'); // WIF private key
-
-contract.connect(provider, signer);
 ```
 
 The `connect()` method stores the provider and signer on the contract instance so you do not need to pass them to every subsequent method call.
@@ -88,7 +80,7 @@ The `connect()` method stores the provider and signer on the contract instance s
 | -------- | -------- |
 | `WhatsOnChainProvider('mainnet')` | Production deployment |
 | `WhatsOnChainProvider('testnet')` | Testing with real transactions |
-| `RPCProvider({ host, port, ... })` | Local regtest node |
+| `new RPCProvider(url, user, pass, options?)` | Local regtest node |
 | `MockProvider()` | Unit tests (no real broadcast) |
 
 ### Signer Options
@@ -96,23 +88,20 @@ The `connect()` method stores the provider and signer on the contract instance s
 | Signer | Use Case |
 | ------ | -------- |
 | `LocalSigner(wif)` | Server-side, testing |
-| `ExternalSigner(callback)` | HSM, hardware wallet |
-| `WalletSigner(walletApi)` | Browser wallet extension |
+| `new ExternalSigner(pubKeyHex, addressStr, signFn)` | HSM, hardware wallet |
+| `new WalletSigner({ protocolID, keyID, wallet? })` | Browser wallet extension |
 
 ## Step 4: Deploy
 
 Call `deploy()` to build, sign, and broadcast the deployment transaction:
 
 ```typescript
-const deployResult = await contract.deploy({ satoshis: 10000 });
+const deployResult = await contract.deploy(provider, signer, { satoshis: 10000 });
 
 console.log(deployResult);
 // {
 //   txid: 'a1b2c3d4e5f6...',
-//   outputIndex: 0,
-//   satoshis: 10000,
-//   script: '76a91489abcdef...88ac',
-//   fee: 226,
+//   tx: <Transaction>,
 // }
 ```
 
@@ -120,14 +109,12 @@ console.log(deployResult);
 
 | Option | Type | Default | Description |
 | ------ | ---- | ------- | ----------- |
-| `satoshis` | `number` | required | Amount of satoshis to lock in the contract output |
-| `feeRate` | `number` | `0.5` | Fee rate in satoshis per byte |
-| `fundingUtxos` | `UTXO[]` | auto-selected | Specific UTXOs to use for funding (optional) |
+| `satoshis` | `number` | `1` | Amount of satoshis to lock in the contract output |
 | `changeAddress` | `string` | signer's address | Address for the change output |
 
 ### What Happens During deploy()
 
-1. **Fetch funding UTXOs.** The SDK calls `provider.getUtxos(signer.address)` to find unspent outputs controlled by the signer. If `fundingUtxos` is provided, those are used instead.
+1. **Fetch funding UTXOs.** The SDK calls `provider.getUtxos(signer.address)` to find unspent outputs controlled by the signer.
 2. **Select UTXOs.** The SDK's `selectUtxos()` function picks enough UTXOs to cover the contract amount plus the estimated fee.
 3. **Build the transaction.** A new transaction is constructed with:
    - **Inputs:** The selected funding UTXOs.
@@ -142,7 +129,7 @@ console.log(deployResult);
 After deployment, verify the transaction exists on-chain:
 
 ```typescript
-const tx = await provider.getTx(deployResult.txid);
+const tx = await provider.getTransaction(deployResult.txid);
 console.log(tx.confirmations); // 0 initially, then 1+ after a block
 ```
 
@@ -159,11 +146,9 @@ Stateful contracts (those extending `StatefulSmartContract`) are deployed the sa
 ```typescript
 import counterArtifact from './artifacts/Counter.json';
 
-const counter = new RunarContract(counterArtifact);
-counter.setState({ count: 0n });
+const counter = new RunarContract(counterArtifact, [0n]);
 
-counter.connect(provider, signer);
-const result = await counter.deploy({ satoshis: 10000 });
+const result = await counter.deploy(provider, signer, { satoshis: 10000 });
 ```
 
 The `setState()` call sets the initial state. During deployment, the SDK serializes this state and appends it to the locking script. The resulting script looks like:
@@ -185,8 +170,6 @@ const contract = await RunarContract.fromTxId(
   0,                   // output index
   provider,
 );
-
-contract.connect(provider, signer);
 ```
 
 This fetches the transaction from the network, reads the locking script from the specified output, and reconstructs the contract instance. For stateful contracts, it also deserializes the current state from the script.
@@ -199,20 +182,27 @@ For advanced use cases where you need full control over the transaction, use the
 import { buildDeployTransaction, selectUtxos } from 'runar-sdk';
 
 const utxos = await provider.getUtxos(signer.address);
-const selected = selectUtxos(utxos, 10000 + 300); // amount + estimated fee
+const lockingScript = contract.getLockingScript();
+const selected = selectUtxos(utxos, 10000 + 300, lockingScript.length / 2); // amount + estimated fee
 
-const tx = buildDeployTransaction(contract, selected, {
-  satoshis: 10000,
-  changeAddress: signer.address,
-});
+const tx = buildDeployTransaction(
+  lockingScript,
+  selected,
+  10000,
+  signer.address,
+  signer.changeScript,
+);
 
 // Inspect the transaction before signing
 console.log(tx.inputs.length);  // number of funding inputs
 console.log(tx.outputs.length); // 2 (contract + change)
 
-// Sign and broadcast manually
-const signedTx = await signer.signTransaction(tx);
-const txid = await provider.broadcast(signedTx.toHex());
+// Sign each input and broadcast manually
+for (let i = 0; i < tx.inputs.length; i++) {
+  const sig = await signer.sign(tx.toHex(), i, selected[i].script, selected[i].satoshis);
+  tx.inputs[i].setScript(sig);
+}
+const txid = await provider.broadcast(tx.toHex());
 ```
 
 This gives you the ability to inspect, modify, or audit the transaction before it is broadcast.
@@ -232,5 +222,5 @@ Common deployment errors and how to resolve them:
 ## What's Next
 
 - [Calling a Contract](/docs/en/sdk/calling) -- How to spend the deployed contract UTXO
-- [Inductive Contracts](/docs/en/sdk/inductive-contracts) -- Deploying and interacting with stateful contracts
+- [Stateful Contracts](/docs/en/sdk/inductive-contracts) -- Deploying and interacting with stateful contracts
 - [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- Understanding fee estimation and UTXO selection

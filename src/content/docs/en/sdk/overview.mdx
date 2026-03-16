@@ -47,12 +47,12 @@ import {
 import { RunarContract } from 'runar-sdk';
 import artifact from './artifacts/P2PKH.json';
 
-const contract = new RunarContract(artifact, {
-  pubKeyHash: '89abcdef01234567890abcdef01234567890abcd',
-});
+const contract = new RunarContract(artifact, [
+  '89abcdef01234567890abcdef01234567890abcd',
+]);
 ```
 
-The second argument is a record of constructor arguments. These are spliced into the script at the positions defined by the artifact's `constructorSlots`. For contracts with no constructor parameters, pass an empty object or omit the argument.
+The second argument is an array of constructor arguments matching the order in the artifact's `abi.constructor.params`. These are spliced into the script at the positions defined by the artifact's `constructorSlots`. For contracts with no constructor parameters, pass an empty array.
 
 ### Key Methods
 
@@ -60,26 +60,21 @@ The second argument is a record of constructor arguments. These are spliced into
 | ------ | ----------- |
 | `deploy(provider, signer, options)` | Build and broadcast a deployment transaction |
 | `call(methodName, args, provider, signer, options)` | Build and broadcast a spending transaction |
-| `connect(provider, signer)` | Store a provider and signer for later use |
 | `setState(newState)` | Update the contract's in-memory state (stateful contracts) |
 | `get state` | Get the current in-memory state |
 | `getLockingScript()` | Get the fully resolved locking script hex |
-| `buildUnlockingScript(methodName, args)` | Build an unlocking script without broadcasting |
 | `static fromTxId(artifact, txid, outputIndex, provider)` | Reconnect to a deployed contract by transaction ID |
 
 ### Connecting a Provider and Signer
 
-Rather than passing a provider and signer to every method call, you can connect them once:
+The provider and signer are passed to `deploy()` and `call()` as arguments:
 
 ```typescript
 const provider = new WhatsOnChainProvider('testnet');
 const signer = new LocalSigner('your-WIF-private-key');
 
-contract.connect(provider, signer);
-
-// Now deploy and call without passing provider/signer each time
-const deployResult = await contract.deploy({ satoshis: 10000 });
-const callResult = await contract.call('unlock', { sig, pubKey });
+const deployResult = await contract.deploy(provider, signer, { satoshis: 10000 });
+const callResult = await contract.call('unlock', [null, signer.publicKey], provider, signer);
 ```
 
 ## Providers
@@ -100,8 +95,11 @@ const testnet = new WhatsOnChainProvider('testnet');
 Methods:
 - `getUtxos(address)` -- Fetch unspent outputs for an address.
 - `broadcast(txHex)` -- Broadcast a raw transaction.
-- `getTx(txid)` -- Fetch a transaction by ID.
-- `getOutput(txid, index)` -- Fetch a specific transaction output.
+- `getTransaction(txid)` -- Fetch a transaction by ID.
+- `getContractUtxo(scriptHash)` -- Fetch the current UTXO for a contract by script hash.
+- `getNetwork()` -- Return the network name (mainnet, testnet, etc.).
+- `getFeeRate()` -- Return the current fee rate in satoshis per byte.
+- `getRawTransaction(txid)` -- Fetch the raw transaction hex by ID.
 
 ### MockProvider
 
@@ -111,7 +109,7 @@ A testing provider that simulates the network locally. No real transactions are 
 import { MockProvider } from 'runar-sdk';
 
 const mock = new MockProvider();
-mock.addUtxo({
+mock.addUtxo('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', {
   txid: 'abc123...',
   outputIndex: 0,
   satoshis: 50000,
@@ -128,17 +126,16 @@ Connects directly to a BSV node via JSON-RPC. Useful for local development with 
 ```typescript
 import { RPCProvider } from 'runar-sdk';
 
-const rpc = new RPCProvider({
-  host: 'localhost',
-  port: 8332,
-  username: 'rpc_user',
-  password: 'rpc_pass',
-});
+const rpc = new RPCProvider(
+  'http://localhost:8332',
+  'rpc_user',
+  'rpc_pass',
+);
 ```
 
 ## Signers
 
-Signers produce cryptographic signatures for transaction inputs. They never expose the private key to the SDK -- they receive a sighash and return a signature.
+Signers produce cryptographic signatures for transaction inputs. They never expose the private key to the SDK -- they receive the full transaction hex, input index, subscript, and satoshis, and return a DER signature.
 
 ### LocalSigner
 
@@ -159,24 +156,27 @@ Delegates signing to an external process or service. You provide a callback func
 ```typescript
 import { ExternalSigner } from 'runar-sdk';
 
-const signer = new ExternalSigner(async (sighash) => {
+const signer = new ExternalSigner(pubKeyHex, addressStr, async (txHex, inputIndex, subscript, satoshis) => {
   // Call your HSM, hardware wallet, or signing service
-  const signature = await mySigningService.sign(sighash);
+  const signature = await mySigningService.sign(txHex, inputIndex, subscript, satoshis);
   return signature;
 });
 ```
 
 ### WalletSigner
 
-Integrates with browser wallet extensions that implement the Runar wallet interface.
+Integrates with BRC-100 compatible wallets.
 
 ```typescript
 import { WalletSigner } from 'runar-sdk';
 
-const signer = new WalletSigner(window.runarWallet);
+const signer = new WalletSigner({
+  protocolID: [0, 'runar'],
+  keyID: '1',
+});
 ```
 
-The `WalletSigner` prompts the user to approve each transaction through the wallet UI.
+The `WalletSigner` uses the standard BRC-100 `WalletClient` interface from `@bsv/sdk`.
 
 ## Deployment Flow
 
@@ -186,19 +186,16 @@ The typical workflow from compilation to deployment:
 1. Compile       runar compile contracts/P2PKH.runar.ts --output ./artifacts
                  Produces: artifacts/P2PKH.json
 
-2. Instantiate   const contract = new RunarContract(artifact, constructorArgs)
+2. Instantiate   const contract = new RunarContract(artifact, [pubKeyHash])
                  SDK fills constructor placeholders in the script
 
-3. Connect       contract.connect(provider, signer)
-                 Attaches network and signing capabilities
-
-4. Deploy        const result = await contract.deploy({ satoshis: 10000 })
+3. Deploy        const result = await contract.deploy(provider, signer, { satoshis: 10000 })
                  Builds tx, signs funding input, broadcasts
-                 Returns: { txid, outputIndex, satoshis }
+                 Returns: { txid, tx }
 
-5. Call          const result = await contract.call('unlock', { sig, pubKey })
+4. Call          const result = await contract.call('unlock', args, provider, signer)
                  Builds spending tx, signs, broadcasts
-                 Returns: { txid, success }
+                 Returns: { txid, tx }
 ```
 
 For stateful contracts, step 5 can be repeated multiple times, with each call producing a new UTXO that carries the updated state.
@@ -224,14 +221,14 @@ The SDK exports several utility functions for advanced use cases:
 
 | Function | Description |
 | -------- | ----------- |
-| `serializeState(state, stateFields)` | Serialize a state object to bytes |
-| `deserializeState(bytes, stateFields)` | Deserialize bytes to a state object |
-| `extractStateFromScript(script, stateFields)` | Extract state from a locking script |
-| `computeOpPushTx(tx, inputIndex)` | Compute the OP_PUSH_TX preimage |
-| `buildDeployTransaction(contract, utxos, options)` | Build a deployment transaction manually |
-| `buildCallTransaction(contract, methodName, args, utxos, options)` | Build a call transaction manually |
-| `selectUtxos(utxos, targetAmount)` | Select UTXOs to cover a target amount |
-| `estimateDeployFee(contract, feeRate)` | Estimate the fee for deploying a contract |
+| `serializeState(fields, values)` | Serialize a state object to bytes |
+| `deserializeState(fields, scriptHex)` | Deserialize bytes to a state object |
+| `extractStateFromScript(artifact, scriptHex)` | Extract state from a locking script |
+| `computeOpPushTx(txOrHex, inputIndex, subscript, satoshis)` | Compute the OP_PUSH_TX preimage |
+| `buildDeployTransaction(lockingScript, utxos, satoshis, changeAddress, changeScript, feeRate?)` | Build a deployment transaction manually |
+| `buildCallTransaction(currentUtxo, unlockingScript, newLockingScript?, newSatoshis?, changeAddress?, changeScript?, additionalUtxos?, feeRate?)` | Build a call transaction manually |
+| `selectUtxos(utxos, targetSatoshis, lockingScriptByteLen, feeRate?)` | Select UTXOs to cover a target amount |
+| `estimateDeployFee(numInputs, lockingScriptByteLen, feeRate?)` | Estimate the fee for deploying a contract |
 | `generateTypescript(artifact)` | Generate TypeScript bindings from an artifact |
 
 These functions are used internally by `RunarContract` but are also available for cases where you need fine-grained control over transaction construction.
@@ -246,6 +243,6 @@ If you upgrade the compiler and the artifact format changes, you will also need 
 
 - [Deploying a Contract](/docs/en/sdk/deploying) -- Step-by-step deployment guide
 - [Calling a Contract](/docs/en/sdk/calling) -- How to invoke contract methods
-- [Inductive Contracts](/docs/en/sdk/inductive-contracts) -- Building stateful contracts with state continuation
+- [Stateful Contracts](/docs/en/sdk/inductive-contracts) -- Building stateful contracts with state continuation
 - [Token Contracts](/docs/en/sdk/token-contracts) -- Fungible and non-fungible token patterns
 - [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- UTXO selection and fee management

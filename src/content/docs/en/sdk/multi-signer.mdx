@@ -1,0 +1,269 @@
+---
+title: "Multi-Signer Transactions"
+description: "Building transactions that require signatures from multiple parties."
+section: "sdk"
+order: 35
+lang: "en"
+---
+
+Many contracts require signatures from more than one party. An escrow contract needs the buyer and seller to co-sign. A multi-sig wallet requires M-of-N keyholders to approve. A two-party bet needs both participants to agree on settlement. In all of these cases, a single signer cannot produce the entire unlocking script alone.
+
+The SDK solves this with a two-phase workflow: **prepare** the transaction (computing everything except the external signatures), then **finalize** it once the signatures arrive.
+
+## The Problem
+
+When you call `contract.call()`, the SDK builds the transaction, signs all `Sig` parameters with the connected signer, and broadcasts immediately. This works when a single party controls all required keys. But when a contract method has `Sig` parameters that belong to different parties, the connected signer can only produce its own signatures -- the other parties need to sign independently.
+
+You cannot pre-compute signatures because they depend on the full transaction. And you cannot build the transaction without knowing the signatures, because the unlocking script length affects the fee calculation. The prepare/finalize API breaks this circular dependency by using 72-byte placeholder signatures during transaction construction, then swapping in real signatures before broadcast.
+
+## API Reference
+
+### prepareCall()
+
+Builds the transaction for a method call without signing the primary contract input's `Sig` parameters. P2PKH funding inputs are signed with the connected signer. Only the contract input's `Sig` params are left as placeholders.
+
+```typescript
+async prepareCall(
+  methodName: string,
+  args: unknown[],
+  options?: CallOptions,
+): Promise<PreparedCall>
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `methodName` | `string` | The public method to call |
+| `args` | `unknown[]` | Method arguments. Pass `null` for each `Sig` parameter that needs an external signature. |
+| `options` | `CallOptions` | Optional. Same options as `call()` -- `satoshis`, `changeAddress`, `newState`, `terminalOutputs`, etc. |
+
+**Returns:** A `PreparedCall` object containing everything needed for external signing and subsequent finalization.
+
+The contract must have a provider and signer connected (via `connect()`) before calling `prepareCall()`. The connected signer is used to sign P2PKH funding inputs and to derive the change address and public key, but it does not sign the contract input's `Sig` parameters.
+
+### The PreparedCall Type
+
+```typescript
+interface PreparedCall {
+  /** BIP-143 sighash (hex) -- what external signers ECDSA-sign. */
+  sighash: string;
+
+  /** Full BIP-143 preimage (hex). */
+  preimage: string;
+
+  /** OP_PUSH_TX DER signature + sighash byte (hex). Empty if not needed. */
+  opPushTxSig: string;
+
+  /** Built transaction with placeholder sigs in the primary contract input. */
+  tx: Transaction;
+
+  /** Arg positions that need external Sig values. */
+  sigIndices: number[];
+}
+```
+
+The public fields are the ones you distribute to external signers:
+
+| Field | Purpose |
+| ----- | ------- |
+| `sighash` | The BIP-143 sighash digest (hex). External signers ECDSA-sign this value. Present when the contract uses `SigHashPreimage` or is stateful. |
+| `preimage` | The full BIP-143 preimage (hex). Useful if signers need to inspect the transaction details before signing. |
+| `opPushTxSig` | The OP_PUSH_TX signature, pre-computed by the SDK. External signers do not need to produce this. |
+| `tx` | The fully built `Transaction` object. External signers can call `tx.toHex()` to get the raw transaction for signing. |
+| `sigIndices` | Which positions in the `args` array correspond to `Sig` parameters that need external signatures. |
+
+The `PreparedCall` also contains internal fields (prefixed with `_`) that are consumed by `finalizeCall()`. Treat these as opaque -- do not modify them.
+
+### finalizeCall()
+
+Injects the collected signatures into the prepared transaction and broadcasts it.
+
+```typescript
+async finalizeCall(
+  prepared: PreparedCall,
+  signatures: Record<number, string>,
+): Promise<{ txid: string; tx: TransactionData }>
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `prepared` | `PreparedCall` | The object returned by `prepareCall()` |
+| `signatures` | `Record<number, string>` | A map from arg index to DER signature hex (with sighash byte appended). Each key must be one of `prepared.sigIndices`. |
+
+**Returns:** The broadcast result with `txid` and the full `TransactionData`.
+
+After a successful `finalizeCall()`, the contract instance updates its tracked UTXO just like a regular `call()` -- for stateful contracts, the instance points to the new continuation UTXO.
+
+## Step-by-Step Flow
+
+The multi-signer workflow has four steps:
+
+### 1. Prepare the Transaction
+
+The initiating party builds the transaction with placeholder signatures:
+
+```typescript
+const prepared = await contract.prepareCall('release', [
+  null,        // Sig for party A (index 0)
+  null,        // Sig for party B (index 1)
+  someArg,
+]);
+// prepared.sigIndices is [0, 1]
+```
+
+Pass `null` for every `Sig` parameter. The SDK inserts 72-byte placeholder values, builds the full transaction (including funding inputs, change output, and OP_PUSH_TX preimage for stateful contracts), and returns the `PreparedCall`.
+
+### 2. Distribute Signing Material
+
+Send the signing material to each external signer. What you send depends on how the external signer works:
+
+- **If the signer can compute BIP-143 sighashes itself:** send `prepared.tx.toHex()` (the raw transaction), the input index (always `0` for the primary contract input), the locking script of the contract UTXO, and its satoshi value.
+- **If the signer expects a pre-computed digest:** send `prepared.sighash`. The signer ECDSA-signs this 32-byte hash directly.
+
+### 3. Collect Signatures
+
+Each signer produces a DER-encoded signature with the sighash type byte appended (typically `0x41` for `SIGHASH_ALL | SIGHASH_FORKID`). Collect all signatures and map them to their arg indices:
+
+```typescript
+const signatures: Record<number, string> = {
+  0: sigFromPartyA,   // DER + sighash byte, hex-encoded
+  1: sigFromPartyB,
+};
+```
+
+### 4. Finalize and Broadcast
+
+```typescript
+const result = await contract.finalizeCall(prepared, signatures);
+console.log(result.txid);
+```
+
+The SDK replaces the placeholder signatures with the real ones, reassembles the unlocking script, and broadcasts the transaction.
+
+## Complete Example: Two-Party Escrow
+
+Consider an escrow contract where funds are released when both the buyer and seller sign:
+
+```runar
+contract Escrow(buyerPubKey: PubKey, sellerPubKey: PubKey) {
+  @method()
+  release(buyerSig: Sig, sellerSig: Sig) {
+    assert(checkSig(buyerSig, this.buyerPubKey));
+    assert(checkSig(sellerSig, this.sellerPubKey));
+  }
+}
+```
+
+The buyer initiates the release. Their key is connected as the signer, but the seller's signature must come from elsewhere.
+
+```typescript
+import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import artifact from './artifacts/Escrow.json';
+
+// --- Buyer's side ---
+const provider = new WhatsOnChainProvider('mainnet');
+const buyerSigner = new LocalSigner('cBuyerPrivateKey...');
+
+// Reconnect to the deployed escrow
+const contract = await RunarContract.fromTxId(
+  artifact,
+  'abc123...', // deployment txid
+  0,
+  provider,
+);
+contract.connect(provider, buyerSigner);
+
+// Step 1: Prepare -- null for both Sig params
+const prepared = await contract.prepareCall('release', [null, null]);
+// prepared.sigIndices = [0, 1]
+
+// Step 2: Send signing material to the seller.
+// The seller needs the raw tx hex and contract UTXO details to sign,
+// OR just the sighash if they can sign a pre-computed digest.
+const txHex = prepared.tx.toHex();
+// Send txHex (or prepared.sighash) to the seller over your app's channel
+
+// Step 3: The buyer signs their own input
+const buyerSig = await buyerSigner.sign(
+  txHex,
+  0,                              // input index for the contract UTXO
+  contract.getLockingScript(),     // locking script being spent
+  contract.getUtxo()!.satoshis,   // satoshi value
+);
+
+// The seller signs and returns their signature (via your app's channel)
+const sellerSig = await getSellerSignature(); // your application logic
+
+// Step 4: Finalize with both signatures
+const result = await contract.finalizeCall(prepared, {
+  0: buyerSig,
+  1: sellerSig,
+});
+
+console.log('Escrow released:', result.txid);
+```
+
+## Using the ExternalSigner
+
+When the external party's private key is not directly available (hardware wallet, browser extension, remote service), use `ExternalSigner` to wrap a callback:
+
+```typescript
+import { ExternalSigner } from 'runar-sdk';
+
+const externalSigner = new ExternalSigner(
+  '02aabb...',        // hex-encoded public key
+  '1ExternalAddr...', // BSV address
+  async (txHex, inputIndex, subscript, satoshis, sigHashType) => {
+    // Delegate to hardware wallet, browser extension, etc.
+    return await hardwareWallet.sign(txHex, inputIndex, subscript, satoshis, sigHashType);
+  },
+);
+```
+
+The `ExternalSigner` implements the `Signer` interface. You can pass it to `connect()` if the external party is the one building the transaction, or use it independently to produce signatures for `finalizeCall()`.
+
+## Code-Generated Typed Wrappers
+
+When you run `runar codegen`, the generated TypeScript wrapper class includes typed `prepare` and `finalize` methods for every contract method that has `Sig` parameters. For example, given the Escrow contract above, the generated wrapper provides:
+
+```typescript
+// Generated methods on EscrowContract:
+async prepareRelease(): Promise<PreparedCall>
+async finalizeRelease(
+  prepared: PreparedCall,
+  buyerSig: string,
+  sellerSig: string,
+): Promise<CallResult>
+```
+
+The `Sig` parameters are hidden from `prepareRelease()` (the SDK passes `null` internally) and appear as named `string` parameters on `finalizeRelease()`. The generated code calls `this.inner.prepareCall('release', [null, null])` and `this.inner.finalizeCall(prepared, { 0: buyerSig, 1: sellerSig })` under the hood.
+
+For contracts with a single `Sig` parameter:
+
+```typescript
+// Generated for a P2PKH-like contract:
+async prepareUnlock(pubKey: string | null): Promise<PreparedCall>
+async finalizeUnlock(prepared: PreparedCall, sig: string): Promise<CallResult>
+```
+
+Methods that have no `Sig` parameters do not get prepare/finalize wrappers generated.
+
+## Signing Subscripts for Stateful Contracts
+
+In stateful contracts, the user's `checkSig` executes after `OP_CODESEPARATOR` (the `checkPreimage` call is auto-injected at method entry). This means the subscript used for BIP-143 signing is the **trimmed** script -- the portion after the code separator for the relevant method index.
+
+The SDK handles this automatically inside `call()`. But if you are computing signatures externally and need the correct subscript, be aware of this distinction:
+
+- **Stateful contracts:** sign against the trimmed script (after `OP_CODESEPARATOR`).
+- **Stateless contracts:** sign against the full locking script.
+
+If you are using the `prepared.sighash` field, this is already accounted for -- the sighash is computed from the correct preimage. External signers that sign the sighash directly do not need to worry about subscripts.
+
+## What's Next
+
+- [Calling a Contract](/docs/en/sdk/calling) -- The standard single-signer call flow
+- [Inductive (Stateful) Contracts](/docs/en/sdk/inductive-contracts) -- State management for multi-step contracts
+- [Multi-Party Escrow Tutorial](/docs/en/tutorials/multi-party-escrow) -- End-to-end tutorial building an escrow contract

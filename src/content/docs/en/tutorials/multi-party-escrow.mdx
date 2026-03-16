@@ -47,7 +47,7 @@ This design ensures:
 
 ## Writing the Contract
 
-Create `contracts/Escrow.runar.ts`:
+Create `src/contracts/Escrow.runar.ts`:
 
 ```typescript
 import {
@@ -157,68 +157,62 @@ Create `tests/Escrow.test.ts`:
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB, CHARLIE } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('Escrow', () => {
-  const buyerKey = bsv.PrivateKey.fromRandom('testnet');
-  const sellerKey = bsv.PrivateKey.fromRandom('testnet');
-  const arbiterKey = bsv.PrivateKey.fromRandom('testnet');
-  const buyerPub = buyerKey.toPublicKey().toString();
-  const sellerPub = sellerKey.toPublicKey().toString();
-  const arbiterPub = arbiterKey.toPublicKey().toString();
+  const source = readFileSync('./src/contracts/Escrow.runar.ts', 'utf-8');
 
-  async function createEscrow() {
-    const contract = await TestContract.fromSource(
-      'contracts/Escrow.runar.ts',
-      'Escrow'
-    );
-    return contract.create(buyerPub, sellerPub, arbiterPub);
+  // ALICE = buyer, BOB = seller, CHARLIE = arbiter
+  function createEscrow() {
+    return TestContract.fromSource(source, {
+      buyer: ALICE.pubKey,
+      seller: BOB.pubKey,
+      arbiter: CHARLIE.pubKey,
+    });
   }
 
   describe('release', () => {
-    it('should succeed with seller + buyer signatures', async () => {
-      const instance = await createEscrow();
+    it('should succeed with seller + buyer signatures', () => {
+      const contract = createEscrow();
 
-      const result = await instance.call('release', {
-        sellerSig: instance.sign(sellerKey),
-        buyerSig: instance.sign(buyerKey),
+      const result = contract.call('release', {
+        sellerSig: BOB.privKey,
+        buyerSig: ALICE.privKey,
       });
 
       expect(result.success).toBe(true);
     });
 
-    it('should fail with wrong seller key', async () => {
-      const instance = await createEscrow();
-      const wrongKey = bsv.PrivateKey.fromRandom('testnet');
+    it('should fail with wrong seller key', () => {
+      const contract = createEscrow();
 
-      const result = await instance.call('release', {
-        sellerSig: instance.sign(wrongKey),
-        buyerSig: instance.sign(buyerKey),
+      const result = contract.call('release', {
+        sellerSig: CHARLIE.privKey,
+        buyerSig: ALICE.privKey,
       });
 
       expect(result.success).toBe(false);
     });
 
-    it('should fail with wrong buyer key', async () => {
-      const instance = await createEscrow();
-      const wrongKey = bsv.PrivateKey.fromRandom('testnet');
+    it('should fail with wrong buyer key', () => {
+      const contract = createEscrow();
 
-      const result = await instance.call('release', {
-        sellerSig: instance.sign(sellerKey),
-        buyerSig: instance.sign(wrongKey),
+      const result = contract.call('release', {
+        sellerSig: BOB.privKey,
+        buyerSig: CHARLIE.privKey,
       });
 
       expect(result.success).toBe(false);
     });
 
-    it('should fail with only seller signature', async () => {
-      const instance = await createEscrow();
+    it('should fail with only seller signature', () => {
+      const contract = createEscrow();
 
       // Seller tries to release alone (using seller key for both)
-      const result = await instance.call('release', {
-        sellerSig: instance.sign(sellerKey),
-        buyerSig: instance.sign(sellerKey),
+      const result = contract.call('release', {
+        sellerSig: BOB.privKey,
+        buyerSig: BOB.privKey,
       });
 
       expect(result.success).toBe(false);
@@ -226,36 +220,36 @@ describe('Escrow', () => {
   });
 
   describe('refund', () => {
-    it('should succeed with buyer + arbiter signatures', async () => {
-      const instance = await createEscrow();
+    it('should succeed with buyer + arbiter signatures', () => {
+      const contract = createEscrow();
 
-      const result = await instance.call('refund', {
-        buyerSig: instance.sign(buyerKey),
-        arbiterSig: instance.sign(arbiterKey),
+      const result = contract.call('refund', {
+        buyerSig: ALICE.privKey,
+        arbiterSig: CHARLIE.privKey,
       });
 
       expect(result.success).toBe(true);
     });
 
-    it('should fail without arbiter agreement', async () => {
-      const instance = await createEscrow();
+    it('should fail without arbiter agreement', () => {
+      const contract = createEscrow();
 
       // Buyer tries to refund alone
-      const result = await instance.call('refund', {
-        buyerSig: instance.sign(buyerKey),
-        arbiterSig: instance.sign(buyerKey),
+      const result = contract.call('refund', {
+        buyerSig: ALICE.privKey,
+        arbiterSig: ALICE.privKey,
       });
 
       expect(result.success).toBe(false);
     });
 
-    it('should fail if seller tries to block refund', async () => {
-      const instance = await createEscrow();
+    it('should fail if seller tries to block refund', () => {
+      const contract = createEscrow();
 
       // Seller cannot participate in the refund flow
-      const result = await instance.call('refund', {
-        buyerSig: instance.sign(buyerKey),
-        arbiterSig: instance.sign(sellerKey),
+      const result = contract.call('refund', {
+        buyerSig: ALICE.privKey,
+        arbiterSig: BOB.privKey,
       });
 
       expect(result.success).toBe(false);

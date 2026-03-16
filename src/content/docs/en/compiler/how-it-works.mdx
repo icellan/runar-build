@@ -48,12 +48,14 @@ Passes 1 through 3 operate on the `ContractNode` AST. Pass 4 produces the `ANFPr
 
 The parsing pass is the only language-specific component in the entire pipeline. Each supported source language has its own parser, but all parsers produce the same `ContractNode` AST:
 
-| Source Language | Parser Technology      | Entry Point     |
-| --------------- | ---------------------- | --------------- |
-| TypeScript      | ts-morph               | 01-parse.ts     |
-| Go              | tree-sitter            | 01-parse.ts     |
-| Rust            | SWC                    | 01-parse.ts     |
-| Python          | Recursive descent      | 01-parse.ts     |
+| Source Language | Parser Technology              | Entry Point          |
+| --------------- | ----------------------------- | -------------------- |
+| TypeScript      | ts-morph                      | 01-parse.ts          |
+| Solidity        | Hand-written recursive descent | 01-parse-sol.ts      |
+| Move            | Hand-written recursive descent | 01-parse-move.ts     |
+| Go              | Hand-written recursive descent | 01-parse-go.ts       |
+| Rust            | Hand-written recursive descent | 01-parse-rust.ts     |
+| Python          | Hand-written tokenizer + recursive descent | 01-parse-python.ts |
 
 The `ContractNode` AST is a language-neutral representation of a Runar contract. It captures the contract name, constructor parameters, state fields, and public methods with their parameter lists and body statements. Language-specific syntax is erased at this stage -- a TypeScript contract and a Go contract that define the same logic produce identical ASTs.
 
@@ -95,17 +97,17 @@ This flattened form makes it trivial to determine evaluation order and map opera
 
 Stack IR is a low-level representation that maps ANF operations to Bitcoin Script stack operations. Each ANF temporary is resolved to a stack position, and the appropriate `OP_PICK`, `OP_ROLL`, or `OP_SWAP` instructions are inserted to bring values to the top of the stack when needed.
 
-Stack IR respects a maximum stack depth of 800 elements. When values are buried deeper than the stack can efficiently reach, the alt-stack is used as overflow storage.
+The compiler enforces a maximum stack depth of 800 elements and will emit an error if this limit is exceeded.
 
 ## Optimization Passes
 
 The compiler includes three optional optimization passes that run between the core pipeline stages:
 
-**Peephole optimizer** -- Operates on Stack IR. Applies 15 pattern-matching rules that recognize common opcode sequences and replace them with shorter equivalents. For example, `OP_SWAP OP_DROP` is replaced with `OP_NIP`, and `OP_0 OP_PICK` is replaced with `OP_DUP`.
+**Peephole optimizer** -- Operates on Stack IR. Applies 29 pattern-matching rules that recognize common opcode sequences and replace them with shorter equivalents. For example, `OP_0 OP_PICK` is replaced with `OP_DUP` (this rule operates on Stack IR).
 
 **ANF EC optimizer** -- Operates on ANF IR. Applies 12 algebraic simplification rules specific to secp256k1 elliptic curve operations. These rules recognize patterns like point addition with the identity element or scalar multiplication by one, and simplify them.
 
-**Constant folder** -- Operates on ANF IR. Evaluates constant expressions at compile time. This optimizer is disabled by default because constant folding can change the script size, which affects fee calculations and may be surprising in audit contexts. Enable it explicitly when you want smaller scripts.
+**Constant folder** -- Operates on ANF IR. Evaluates constant expressions at compile time. This optimizer is enabled by default and can be disabled with `disableConstantFolding: true` or the `--disable-constant-folding` CLI flag.
 
 ## Bitcoin Script Code Generation
 
@@ -120,12 +122,14 @@ The final emission pass converts Stack IR into Bitcoin Script hex. Key behaviors
 
 Runar maintains four independent compiler implementations:
 
-| Implementation | Language   | Primary Use Case                          |
-| -------------- | ---------- | ----------------------------------------- |
-| runar-compiler | TypeScript | Reference implementation, CLI, SDK        |
-| runar-go       | Go         | High-performance server-side compilation  |
-| runar-rs       | Rust       | Embedded and WASM compilation             |
-| runar-py       | Python     | Research, prototyping, Jupyter notebooks  |
+| Implementation | Directory | Language   | Primary Use Case                          |
+| -------------- | --------- | ---------- | ----------------------------------------- |
+| runar-compiler | packages/ | TypeScript | Reference implementation, CLI, SDK        |
+| runar-go       | compilers/ | Go         | High-performance server-side compilation  |
+| runar-rs       | compilers/ | Rust       | Embedded and WASM compilation             |
+| runar-py       | compilers/ | Python     | Research, prototyping, Jupyter notebooks  |
+
+The names `runar-go`, `runar-rs`, and `runar-py` refer to the packages/ directory entries; the actual Go, Rust, and Python compiler frontends live in compilers/.
 
 All four implementations share the same test suite of conformance vectors. A conformance vector is a pair of (source contract, expected ANF output). Any implementation that passes all conformance vectors is guaranteed to produce identical Bitcoin Script.
 

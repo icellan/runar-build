@@ -1,0 +1,379 @@
+---
+title: "Wallet Integration"
+description: "Integrating Rúnar contracts with BRC-100 compatible wallets."
+section: "sdk"
+order: 55
+lang: "en"
+---
+
+BRC-100 is the standard interface that BSV wallets expose to applications. Instead of managing private keys yourself, a BRC-100 wallet handles key derivation, UTXO management, and transaction signing on behalf of the user. The Runar SDK provides two classes -- `WalletSigner` and `WalletProvider` -- that bridge the SDK's `Signer` and `Provider` interfaces to any BRC-100 compatible wallet, plus a `deployWithWallet()` method on `RunarContract` that delegates deployment entirely to the wallet.
+
+## When to Use Wallet Integration
+
+Use `WalletSigner` and `WalletProvider` when your application runs in a context where a BRC-100 wallet is available -- typically a browser with a wallet extension, or a mobile app with an embedded wallet. This is the recommended approach for end-user-facing applications because:
+
+- The application never touches private keys.
+- The wallet manages UTXOs, baskets, and fee funding.
+- Transaction signing goes through the wallet's secure key derivation (protocol ID + key ID).
+
+For server-side scripts or tests where you control the keys directly, `LocalSigner` and `WhatsOnChainProvider` are simpler alternatives.
+
+## WalletSigner
+
+`WalletSigner` implements the `Signer` interface by delegating to a BRC-100 `WalletClient` from `@bsv/sdk`. It computes the BIP-143 sighash locally, then sends the pre-hashed digest to the wallet for ECDSA signing via `hashToDirectlySign`.
+
+### Constructor
+
+```typescript
+import { WalletSigner } from 'runar-sdk';
+
+const signer = new WalletSigner(options: WalletSignerOptions);
+```
+
+#### WalletSignerOptions
+
+| Property | Type | Required | Description |
+| -------- | ---- | -------- | ----------- |
+| `protocolID` | `[SecurityLevel, string]` | Yes | BRC-100 protocol ID tuple, e.g. `[2, 'my app']`. `SecurityLevel` is `0 \| 1 \| 2` from `@bsv/sdk`. |
+| `keyID` | `string` | Yes | Key derivation ID, e.g. `'1'`. |
+| `wallet` | `WalletClient` | No | Pre-existing `WalletClient` instance. If omitted, a new `WalletClient()` is created. |
+
+Example:
+
+```typescript
+import { WalletSigner } from 'runar-sdk';
+import { WalletClient } from '@bsv/sdk';
+
+// Use the default WalletClient (auto-discovers the wallet)
+const signer = new WalletSigner({
+  protocolID: [2, 'runar'],
+  keyID: '1',
+});
+
+// Or pass an existing WalletClient
+const wallet = new WalletClient();
+const signer = new WalletSigner({
+  protocolID: [2, 'runar'],
+  keyID: '1',
+  wallet,
+});
+```
+
+### Methods
+
+#### getPublicKey()
+
+```typescript
+async getPublicKey(): Promise<string>
+```
+
+Returns the hex-encoded compressed public key (33 bytes, 66 hex chars) derived by the wallet for the configured `protocolID` and `keyID`. The result is cached after the first call.
+
+#### getAddress()
+
+```typescript
+async getAddress(): Promise<string>
+```
+
+Returns the Hash160 of the public key as a hex string. Calls `getPublicKey()` internally, then computes `Hash.hash160()` on the result.
+
+#### sign()
+
+```typescript
+async sign(
+  txHex: string,
+  inputIndex: number,
+  subscript: string,
+  satoshis: number,
+  sigHashType?: number,  // default: 0x41 (ALL | FORKID)
+): Promise<string>
+```
+
+Signs a transaction input. The method:
+
+1. Parses the transaction from `txHex`.
+2. Builds the BIP-143 preimage using `TransactionSignature.format()` from `@bsv/sdk`.
+3. Computes the double-SHA256 sighash from the preimage.
+4. Sends the sighash to the wallet via `wallet.createSignature({ hashToDirectlySign })`.
+5. Returns the signature in checksig format (DER + sighash flag byte) as a hex string.
+
+#### signHash()
+
+```typescript
+async signHash(sighash: string | number[]): Promise<string>
+```
+
+Signs a pre-computed sighash directly, without building a BIP-143 preimage from a transaction. This is useful for multi-signer flows where the sighash has already been computed by `prepareCall()`.
+
+- `sighash` -- The pre-computed sighash as a hex string or byte array.
+- Returns a DER-encoded signature hex (without the sighash flag byte).
+
+## WalletProvider
+
+`WalletProvider` implements the `Provider` interface using a BRC-100 wallet for UTXO management, GorillaPool ARC for broadcast (EF format), and an optional overlay service for transaction indexing.
+
+### Constructor
+
+```typescript
+import { WalletProvider } from 'runar-sdk';
+
+const provider = new WalletProvider(options: WalletProviderOptions);
+```
+
+#### WalletProviderOptions
+
+| Property | Type | Required | Default | Description |
+| -------- | ---- | -------- | ------- | ----------- |
+| `wallet` | `WalletClient` | Yes | -- | BRC-100 `WalletClient` instance. |
+| `signer` | `Signer` | Yes | -- | Signer derived from the same wallet (typically a `WalletSigner`). |
+| `basket` | `string` | Yes | -- | Wallet basket name for UTXO management, e.g. `'my-app'`. |
+| `fundingTag` | `string` | No | `'funding'` | Tag for funding UTXOs within the basket. |
+| `arcUrl` | `string` | No | `'https://arc.gorillapool.io'` | ARC broadcast endpoint. |
+| `overlayUrl` | `string` | No | `undefined` | Overlay service URL for tx submission and raw tx lookups. |
+| `overlayTopics` | `string[]` | No | `undefined` | Overlay topic names for tx submission, e.g. `['tm_myapp']`. |
+| `network` | `'mainnet' \| 'testnet'` | No | `'mainnet'` | Network selection. |
+| `feeRate` | `number` | No | `100` | Fee rate in satoshis per KB (100 sat/KB = 0.1 sat/byte). |
+
+Example:
+
+```typescript
+import { WalletProvider, WalletSigner } from 'runar-sdk';
+import { WalletClient } from '@bsv/sdk';
+
+const wallet = new WalletClient();
+const signer = new WalletSigner({
+  protocolID: [2, 'runar'],
+  keyID: '1',
+  wallet,
+});
+
+const provider = new WalletProvider({
+  wallet,
+  signer,
+  basket: 'runar-contracts',
+});
+```
+
+### Provider Interface Methods
+
+These methods implement the standard `Provider` interface that the SDK uses internally.
+
+#### getUtxos()
+
+```typescript
+async getUtxos(_address: string): Promise<UTXO[]>
+```
+
+Lists spendable P2PKH UTXOs from the wallet's basket that match the signer's derived key. The `_address` parameter is accepted for interface compatibility but is not used -- UTXOs are fetched from the basket using `wallet.listOutputs()` filtered by the configured `basket` and `fundingTag`.
+
+#### getTransaction()
+
+```typescript
+async getTransaction(txid: string): Promise<TransactionData>
+```
+
+Fetches transaction data. Checks the local cache first; if the raw hex is cached, it parses the transaction and returns its inputs, outputs, version, and locktime. Falls back to a minimal stub if the transaction is not cached.
+
+#### broadcast()
+
+```typescript
+async broadcast(tx: Transaction): Promise<string>
+```
+
+Broadcasts a transaction via ARC in EF (Extended Format). Before sending, it attaches source transactions to each input for EF compliance by fetching parent transactions from the cache or overlay. Returns the txid on success. If an overlay URL and topics are configured, the transaction is also submitted to the overlay for indexing (fire-and-forget).
+
+#### getContractUtxo()
+
+```typescript
+async getContractUtxo(_scriptHash: string): Promise<UTXO | null>
+```
+
+Returns `null`. Contract UTXOs are typically managed by overlay services or application logic rather than the wallet provider.
+
+#### getNetwork()
+
+```typescript
+getNetwork(): 'mainnet' | 'testnet'
+```
+
+Returns the configured network.
+
+#### getRawTransaction()
+
+```typescript
+async getRawTransaction(txid: string): Promise<string>
+```
+
+Fetches raw transaction hex. Checks the local cache first, then falls back to the overlay service if configured. Throws an error if the transaction cannot be found.
+
+#### getFeeRate()
+
+```typescript
+async getFeeRate(): Promise<number>
+```
+
+Returns the configured fee rate in satoshis per KB.
+
+### Additional Methods
+
+#### cacheTx()
+
+```typescript
+cacheTx(txid: string, rawHex: string): void
+```
+
+Manually cache a raw transaction hex by its txid. This is used internally to ensure parent transactions are available for EF format broadcasting. You may also call it directly if you have transactions from an external source that the provider will need for subsequent broadcasts.
+
+#### ensureFunding()
+
+```typescript
+async ensureFunding(minSatoshis: number): Promise<void>
+```
+
+Ensures there are enough P2PKH funding UTXOs in the wallet basket. If the total available balance is less than `minSatoshis`, it creates a new funding UTXO via `wallet.createAction()`. The new UTXO is tagged with the configured `basket` and `fundingTag`, cached for EF lookups, and broadcast to ARC.
+
+## deployWithWallet()
+
+`deployWithWallet()` is a method on `RunarContract` that deploys the contract using the wallet's `createAction()` directly, rather than the SDK building and signing the transaction itself. The wallet owns the coins and creates the transaction.
+
+### Prerequisites
+
+The contract must be connected to a `WalletProvider` via `connect()`. If the provider is not a `WalletProvider`, the method throws an error.
+
+### Signature
+
+```typescript
+async deployWithWallet(options?: {
+  satoshis?: number;     // default: 1
+  description?: string;  // default: 'Runar contract deployment'
+}): Promise<{ txid: string; outputIndex: number }>
+```
+
+### What It Does
+
+1. Validates that the connected provider is a `WalletProvider`.
+2. Gets the contract's locking script via `getLockingScript()`.
+3. Calls `wallet.createAction()` with the locking script as an output, tagged to the provider's basket.
+4. Parses the returned BEEF to find the output index matching the contract's locking script.
+5. Caches the raw transaction hex on the provider for future EF lookups.
+6. Broadcasts the transaction to ARC (non-fatal if it fails, since the wallet may have already broadcast).
+7. Updates the contract's `currentUtxo` so subsequent `call()` invocations know where the contract lives.
+8. Returns the `txid` and `outputIndex`.
+
+### Example
+
+```typescript
+import { RunarContract, WalletProvider, WalletSigner } from 'runar-sdk';
+import { WalletClient } from '@bsv/sdk';
+import artifact from './artifacts/Counter.json';
+
+const wallet = new WalletClient();
+const signer = new WalletSigner({
+  protocolID: [2, 'runar'],
+  keyID: '1',
+  wallet,
+});
+const provider = new WalletProvider({
+  wallet,
+  signer,
+  basket: 'my-app',
+});
+
+const contract = new RunarContract(artifact, [0n]);
+contract.connect(provider, signer);
+
+const { txid, outputIndex } = await contract.deployWithWallet({
+  satoshis: 1000,
+  description: 'Deploy counter contract',
+});
+
+console.log(`Deployed at ${txid}:${outputIndex}`);
+```
+
+## Full Workflow Example
+
+This example shows the complete flow: create a wallet signer and provider, deploy a contract, and call a method on it.
+
+```typescript
+import { RunarContract, WalletProvider, WalletSigner } from 'runar-sdk';
+import { WalletClient } from '@bsv/sdk';
+import counterArtifact from './artifacts/Counter.json';
+
+// 1. Set up wallet, signer, and provider
+const wallet = new WalletClient();
+const signer = new WalletSigner({
+  protocolID: [2, 'runar'],
+  keyID: '1',
+  wallet,
+});
+const provider = new WalletProvider({
+  wallet,
+  signer,
+  basket: 'counter-app',
+  overlayUrl: 'https://overlay.example.com',
+  overlayTopics: ['tm_counter'],
+});
+
+// 2. Instantiate the contract
+const counter = new RunarContract(counterArtifact, [0n]);
+counter.connect(provider, signer);
+
+// 3. Ensure the wallet has enough funding
+await provider.ensureFunding(10000);
+
+// 4. Deploy via the wallet
+const { txid, outputIndex } = await counter.deployWithWallet({
+  satoshis: 1000,
+  description: 'Deploy counter',
+});
+console.log(`Deployed: ${txid}:${outputIndex}`);
+
+// 5. Call a method (uses the connected provider and signer)
+const result = await counter.call('increment', []);
+console.log(`Incremented: ${result.txid}`);
+```
+
+## Overlay Service Integration
+
+When you provide `overlayUrl` and `overlayTopics` to `WalletProvider`, every broadcast transaction is also submitted to the overlay service for indexing. This is a fire-and-forget operation -- if the overlay submission fails, the broadcast itself is not affected.
+
+The overlay is also used as a fallback for fetching raw transactions when they are not in the local cache. This is important for EF format broadcasting, where each input must include its parent transaction.
+
+```typescript
+const provider = new WalletProvider({
+  wallet,
+  signer,
+  basket: 'my-app',
+  overlayUrl: 'https://overlay.example.com',
+  overlayTopics: ['tm_myapp'],
+});
+```
+
+Overlay submission sends the transaction as BEEF with the configured topics:
+
+- **Endpoint:** `POST {overlayUrl}/submit`
+- **Headers:** `Content-Type: application/json`, `X-Topics: ["tm_myapp"]`
+- **Body:** `{ beef: [...], topics: ["tm_myapp"] }`
+
+Raw transaction lookup uses:
+
+- **Endpoint:** `GET {overlayUrl}/api/tx/{txid}/hex`
+
+## deploy() vs deployWithWallet()
+
+| | `deploy()` | `deployWithWallet()` |
+| --- | --- | --- |
+| **Who builds the tx** | The SDK (`buildDeployTransaction`) | The wallet (`createAction`) |
+| **UTXO selection** | SDK fetches UTXOs via provider, selects, signs | Wallet handles everything internally |
+| **Provider required** | Any `Provider` | Must be `WalletProvider` |
+| **Return type** | `{ txid: string; tx: TransactionData }` | `{ txid: string; outputIndex: number }` |
+| **Use case** | Server-side, testing, full control | Browser apps with BRC-100 wallets |
+
+Both methods update the contract's `currentUtxo` after deployment, so subsequent `call()` invocations work the same way regardless of which deployment method was used.
+
+## What's Next
+
+- [Deploying a Contract](/docs/en/sdk/deploying) -- Standard deployment without a wallet
+- [Calling a Contract](/docs/en/sdk/calling) -- Invoking contract methods after deployment
+- [Multi-Signer Flows](/docs/en/sdk/multi-signer) -- Using `prepareCall()` and `signHash()` for multi-party signing
+- [SDK Overview](/docs/en/sdk/overview) -- Full SDK reference

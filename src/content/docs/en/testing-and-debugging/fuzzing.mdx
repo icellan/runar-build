@@ -1,0 +1,208 @@
+---
+title: "Fuzzing & Property Testing"
+description: "Property-based contract testing with randomized inputs."
+section: "testing-and-debugging"
+order: 35
+lang: "en"
+---
+
+The `runar-testing` package includes a CSmith-inspired program fuzzer that generates random, syntactically valid, well-typed Runar contract source strings. Combined with [fast-check](https://github.com/dubzzz/fast-check) arbitraries, these generators enable property-based testing of the compiler, VM, and interpreter -- verifying that the compilation pipeline handles arbitrary valid programs without crashing and that compiled output matches the interpreter's reference semantics.
+
+## Exported Generators
+
+All four generators are exported from the top-level `runar-testing` package:
+
+```typescript
+import {
+  arbContract,
+  arbStatelessContract,
+  arbArithmeticContract,
+  arbCryptoContract,
+} from 'runar-testing';
+```
+
+Each generator is a `fast-check` `Arbitrary<string>` that produces a complete Runar contract source string (including imports, class declaration, constructor, and public methods).
+
+---
+
+## arbContract
+
+```typescript
+const arbContract: fc.Arbitrary<string>;
+```
+
+The general-purpose generator. Produces contracts with 1--3 properties (randomly typed from `bigint`, `boolean`, `ByteString`, `PubKey`, `Sig`) and 1--3 public methods. Method bodies contain variable declarations, conditional statements, and assert statements that reference both instance properties (`this.propN`) and method parameters.
+
+Example output (one possible shrink):
+
+```typescript
+import { SmartContract, assert } from 'runar-lang';
+
+export class TestContract42 extends SmartContract {
+  readonly prop0: bigint;
+
+  constructor(prop0: bigint) {
+    super(prop0);
+    this.prop0 = prop0;
+  }
+
+  public method3(param0: bigint) {
+    let local5: bigint = (this.prop0 + param0);
+    assert((local5 === this.prop0));
+  }
+}
+```
+
+Generated method bodies follow this structure:
+1. 0--2 local variable declarations (always `bigint`, assigned an arithmetic expression)
+2. 0--1 `if` statements with boolean conditions
+3. 1--2 `assert()` statements (every method must end with at least one assert)
+
+Arithmetic expressions are built recursively up to depth 3 using `+`, `-`, and `*` operators. Boolean expressions use comparisons (`===`, `!==`, `<`, `<=`, `>`, `>=`) and logical operators (`&&`, `||`, `!`).
+
+---
+
+## arbStatelessContract
+
+```typescript
+const arbStatelessContract: fc.Arbitrary<string>;
+```
+
+Generates contracts with no properties. The constructor takes no arguments and calls `super()` with no parameters. Each method (1--2 methods) receives 1--3 `bigint` parameters and contains a single `assert` statement that uses those parameters.
+
+Example output:
+
+```typescript
+import { SmartContract, assert } from 'runar-lang';
+
+export class TestContract7 extends SmartContract {
+  constructor() { super(); }
+
+  public method1(param0: bigint, param2: bigint) {
+    assert((param0 === param2));
+  }
+}
+```
+
+Use this generator when testing stateless contract compilation or when you want to isolate method logic from constructor/state management.
+
+---
+
+## arbArithmeticContract
+
+```typescript
+const arbArithmeticContract: fc.Arbitrary<string>;
+```
+
+Generates contracts focused on arithmetic. Properties are all `bigint` (1--3 of them). Each method (1--3 methods) receives 1--3 `bigint` parameters and contains a single `assert` of the form `assert(lhs === rhs)`, where both `lhs` and `rhs` are arithmetic expressions of depth up to 3 that reference instance properties and method parameters.
+
+This generator is useful for stress-testing the compiler's arithmetic codegen and the VM's numeric stack operations.
+
+---
+
+## arbCryptoContract
+
+```typescript
+const arbCryptoContract: fc.Arbitrary<string>;
+```
+
+Generates contracts focused on cryptographic operations. Properties are all `PubKey` (1--2 of them). Each method (1--2 methods) takes `sig: Sig` and `msg: ByteString` parameters and contains two asserts:
+
+1. `assert(checkSig(sig, this.propN))` -- signature verification against the first property
+2. `assert(sha256(msg) !== toByteString('00'.repeat(32)))` -- hash non-triviality check
+
+Generated contracts import `checkSig`, `sha256`, `PubKey`, `Sig`, `ByteString`, and `toByteString` from `runar-lang`.
+
+---
+
+## Using Generators with fast-check
+
+The generators are standard fast-check `Arbitrary` values. Use them with `fc.assert` and `fc.property` to write property-based tests:
+
+```typescript
+import { describe, it } from 'vitest';
+import fc from 'fast-check';
+import { arbContract, arbStatelessContract } from 'runar-testing';
+
+describe('compiler fuzzing', () => {
+  it('compiles arbitrary contracts without crashing', () => {
+    fc.assert(
+      fc.property(arbContract, (source) => {
+        // Feed `source` to the compiler; assert no exception is thrown.
+        // The generated source is always syntactically valid and well-typed,
+        // so compilation should succeed.
+        const artifact = compile(source);
+        expect(artifact).toBeDefined();
+      }),
+      { numRuns: 200 },
+    );
+  });
+
+  it('stateless contracts round-trip through compile + interpret', () => {
+    fc.assert(
+      fc.property(arbStatelessContract, (source) => {
+        const artifact = compile(source);
+        // Verify the artifact has at least one method
+        expect(artifact.abi.methods.length).toBeGreaterThan(0);
+      }),
+      { numRuns: 100 },
+    );
+  });
+});
+```
+
+### Differential Testing
+
+The fuzzer's primary design goal is **differential testing** -- comparing the output of two independent execution paths to find disagreements:
+
+1. **Compiler + Script VM**: Compile the generated contract to Bitcoin Script and execute it in the `ScriptVM`.
+2. **Reference interpreter**: Run the same contract through the `RunarInterpreter`, which evaluates Runar semantics directly without compiling to Script.
+
+If both paths accept (or both reject) the same inputs, confidence in the compiler's correctness increases. Any disagreement is a bug in either the compiler or the interpreter.
+
+```typescript
+import fc from 'fast-check';
+import { arbArithmeticContract, RunarInterpreter, ScriptVM } from 'runar-testing';
+
+fc.assert(
+  fc.property(arbArithmeticContract, (source) => {
+    const artifact = compile(source);
+    const method = artifact.abi.methods[0];
+
+    // Generate random bigint arguments for the method
+    const args = method.params.map(() => BigInt(Math.floor(Math.random() * 1000)));
+
+    // Path 1: Script VM execution
+    const scriptResult = executeInVM(artifact, method.name, args);
+
+    // Path 2: Interpreter execution
+    const interpResult = RunarInterpreter.run(source, method.name, args);
+
+    // Both must agree
+    expect(scriptResult.success).toBe(interpResult.success);
+  }),
+  { numRuns: 500 },
+);
+```
+
+### Shrinking
+
+Because the generators are built from fast-check combinators (`fc.tuple`, `fc.array`, `fc.oneof`, `fc.chain`), they support automatic **shrinking**. When a failing test case is found, fast-check progressively reduces the contract to the smallest source string that still triggers the failure. This typically produces a minimal contract with one property and one method containing a single assert -- much easier to debug than the original randomly generated program.
+
+## Internal Generator Building Blocks
+
+The fuzzer uses several internal arbitraries that are not directly exported but contribute to the generated output:
+
+| Internal Arbitrary | Produces |
+|-------------------|----------|
+| `arbContractName` | Class names like `TestContract0` through `TestContract99` |
+| `arbPropertyName` | Property names like `prop0` through `prop99` |
+| `arbParamName` | Parameter names like `param0` through `param99` |
+| `arbLocalName` | Local variable names like `local0` through `local99` |
+| `arbMethodName` | Method names like `method0` through `method9` |
+| `arbPropertyType` | One of `bigint`, `boolean`, `ByteString`, `PubKey`, `Sig` |
+| `arbByteStringLiteral()` | Expressions like `toByteString('aabb01')` (0--8 random bytes) |
+
+None of these internal arbitraries are re-exported from the `runar-testing` package. The public API consists of the four contract generators listed above. If you need finer-grained control, you can import directly from the generator module: `runar-testing/fuzzer/generator`.
+
+Property and parameter names are deduplicated within each scope. If a collision is detected, an underscore suffix is appended (e.g., `prop5` becomes `prop5_`).

@@ -21,11 +21,15 @@ This discovers all `*.test.ts` files in the `tests/` directory, compiles any ref
 ### Common Flags
 
 ```bash
-# Run tests in watch mode (re-runs on file change)
-runar test --watch
-
 # Run a specific test file
 runar test tests/PriceBet.test.ts
+```
+
+The following flags are vitest flags that may be passed through (they are not registered `runar` CLI flags):
+
+```bash
+# Run tests in watch mode (re-runs on file change)
+runar test --watch
 
 # Run tests matching a name pattern
 runar test --filter "settles to Alice"
@@ -50,50 +54,24 @@ runar test --sequence
 
 ## Test Configuration Options
 
-Test behavior can be configured in your `runar.config.ts` or `vitest.config.ts`:
+Test behavior is configured through `vitest.config.ts` (or `vite.config.ts`). The Runar monorepo's root `vitest.config.ts` provides aliases so tests can import `runar-testing` and `runar-compiler` by name:
 
 ```typescript
-// runar.config.ts
-export default {
+// vitest.config.ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
   test: {
-    // Directory containing test files (default: "tests")
-    dir: 'tests',
+    // Directory containing test files
+    include: ['tests/**/*.test.ts'],
 
-    // Glob pattern for test file discovery (default: "**/*.test.ts")
-    include: '**/*.test.ts',
-
-    // Timeout per test in milliseconds (default: 30000)
-    timeout: 30000,
-
-    // Enable script execution traces in output (default: false)
-    trace: false,
-
-    // Maximum stack depth for script execution (default: 800)
-    maxStackDepth: 800,
-
-    // Enable property-based fuzzing tests (default: false)
-    fuzz: false,
-
-    // Number of fuzz iterations when fuzzing is enabled (default: 1000)
-    fuzzRuns: 1000,
+    // Timeout per test in milliseconds
+    testTimeout: 30000,
   },
-};
+});
 ```
 
-### Environment Variables
-
-You can also configure the test runner through environment variables:
-
-```bash
-# Override test timeout
-RUNAR_TEST_TIMEOUT=60000 runar test
-
-# Enable trace output without config change
-RUNAR_TEST_TRACE=1 runar test
-
-# Set the random seed for deterministic fuzz runs
-RUNAR_FUZZ_SEED=42 runar test
-```
+Since `runar test` delegates to vitest, all standard vitest configuration options apply. See the [vitest documentation](https://vitest.dev/config/) for the full set of options.
 
 ## Filtering and Selecting Tests
 
@@ -136,21 +114,22 @@ runar test --filter "[integration]"
 For low-level testing, `runar-testing` exports a `ScriptVM` that executes raw Bitcoin Script bytecode. This is useful when you need to test compiled output directly or verify script behavior without the `TestContract` abstraction:
 
 ```typescript
-import { ScriptVM } from 'runar-testing';
+import { ScriptVM, hexToBytes } from 'runar-testing';
 
 const vm = new ScriptVM();
 
 // Execute unlocking script followed by locking script
+// ScriptVM.execute() takes Uint8Array arguments, not hex strings
 const result = vm.execute(
-  '4830450221...', // unlocking script (hex)
-  '76a914...88ac'  // locking script (hex)
+  hexToBytes('4830450221...'), // unlocking script (Uint8Array)
+  hexToBytes('76a914...88ac')  // locking script (Uint8Array)
 );
 
 expect(result.success).toBe(true);
-expect(result.stack).toEqual(['01']); // OP_TRUE left on stack
+expect(result.stack).toEqual([new Uint8Array([1])]); // OP_TRUE left on stack (Uint8Array[])
 ```
 
-The `ScriptVM` does **not** mock cryptographic operations -- it uses real signature verification. Use it when you need to test with actual key pairs and signatures.
+By default, the `ScriptVM` **mocks** signature verification (`checkSig` always returns true). Provide a `checkSigCallback` in options to use real signature verification.
 
 ## RunarInterpreter: Reference Oracle
 
@@ -214,15 +193,7 @@ This is primarily a compiler development tool, but contract authors can use it t
 
 Runar supports four frontend languages (TypeScript, Solidity, Move, Python). The conformance test suite verifies that the same logical contract produces identical compiled output regardless of the source language. It works by comparing SHA-256 hashes of the compiled artifact against golden files:
 
-```bash
-# Run the cross-compiler conformance suite
-runar test --conformance
-
-# Update golden files after intentional compiler changes
-runar test --conformance --update-golden
-```
-
-The golden files live in `tests/golden/` and contain the expected SHA-256 hash for each contract/compiler combination. A mismatch indicates a compiler regression or an intentional change that requires updating the golden files.
+The conformance suite is run as part of the project's internal test infrastructure. The golden files live in `tests/golden/` and contain the expected SHA-256 hash for each contract/compiler combination. A mismatch indicates a compiler regression or an intentional change that requires updating the golden files.
 
 ## Understanding Test Output and Reports
 

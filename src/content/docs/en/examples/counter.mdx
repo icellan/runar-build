@@ -131,51 +131,38 @@ All of this is generated automatically by the Runar compiler. You write `this.co
 ```typescript
 import { describe, it, expect } from 'vitest';
 import { TestContract } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('Counter', () => {
-  it('should start at zero', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Counter.runar.ts',
-      'Counter'
-    );
-    const instance = contract.create();
-    expect(instance.state.count).toBe(0n);
+  const source = readFileSync('./src/contracts/Counter.runar.ts', 'utf-8');
+
+  it('should start at zero', () => {
+    const contract = TestContract.fromSource(source);
+    expect(contract.state.count).toBe(0n);
   });
 
-  it('should increment the counter', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Counter.runar.ts',
-      'Counter'
-    );
-    const instance = contract.create();
+  it('should increment the counter', () => {
+    const contract = TestContract.fromSource(source);
 
-    const result = await instance.call('increment', {});
+    const result = contract.call('increment', {});
     expect(result.success).toBe(true);
   });
 
-  it('should decrement the counter', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Counter.runar.ts',
-      'Counter'
-    );
-    const instance = contract.create();
+  it('should decrement the counter', () => {
+    const contract = TestContract.fromSource(source);
 
     // Increment first to get above zero
-    await instance.call('increment', {});
+    contract.call('increment', {});
 
-    const result = await instance.call('decrement', {});
+    const result = contract.call('decrement', {});
     expect(result.success).toBe(true);
   });
 
-  it('should reject decrement at zero', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/Counter.runar.ts',
-      'Counter'
-    );
-    const instance = contract.create();
+  it('should reject decrement at zero', () => {
+    const contract = TestContract.fromSource(source);
 
     // Count starts at 0, decrement should fail
-    const result = await instance.call('decrement', {});
+    const result = contract.call('decrement', {});
     expect(result.success).toBe(false);
   });
 });

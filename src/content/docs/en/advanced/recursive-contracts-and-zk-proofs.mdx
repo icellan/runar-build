@@ -1,6 +1,6 @@
 ---
 title: "Recursive Contracts & ZK Proofs"
-description: "Recursive covenants and zero-knowledge proofs."
+description: "Recursive covenants and zero-knowledge proofs on BSV using Rúnar."
 section: "advanced"
 order: 20
 lang: "en"
@@ -10,110 +10,122 @@ Recursive contracts allow a covenant to perpetuate itself indefinitely across tr
 
 ## Recursive Covenant Fundamentals
 
-A recursive covenant is a covenant that requires its spending transaction to create an output containing the *same* covenant script (potentially with updated state). This means the contract lives on across transactions, recreating itself each time it is spent.
+A recursive covenant is a covenant that requires its spending transaction to create an output containing the *same* covenant script, potentially with updated state. The contract lives on across transactions, recreating itself each time it is spent.
 
-The mechanism relies on `OP_PUSH_TX`: the contract verifies that `hashOutputs` includes an output whose locking script matches the contract's own `scriptCode` (possibly with modified state bytes appended).
+The mechanism relies on OP_PUSH_TX: the contract verifies that `hashOutputs` includes an output whose locking script matches the contract's own `scriptCode` with modified state bytes appended.
 
 ```
-Tx0: [Contract(state=0)] --spend--> Tx1: [Contract(state=1)] --spend--> Tx2: [Contract(state=2)]
+Tx0: [Contract(count=0)] --spend--> Tx1: [Contract(count=1)] --spend--> Tx2: [Contract(count=2)]
 ```
 
 Each transaction consumes the previous contract UTXO and creates a new one with updated state, forming an unbounded chain.
 
-### How It Works in Runar
+### How It Works in Rúnar
 
-Runar's `StatefulSmartContract` base class handles the recursive plumbing automatically. When you declare `@state` fields and call `this.updateState()`, the compiler generates the covenant logic that:
+Rúnar's `StatefulSmartContract` base class handles the recursive plumbing automatically. When you declare mutable fields and call `this.addOutput()` followed by the `extractOutputHash` check, the compiler generates the covenant logic that:
 
 1. Extracts the current contract's `scriptCode` from the preimage
 2. Replaces the state portion of the script with the new state values
 3. Builds an output with the updated script
 4. Verifies that `hashOutputs` matches
 
+Here is the simplest recursive contract -- a counter that increments each time it is spent:
+
 ```typescript
 import {
-  StatefulSmartContract, assert, state, method,
-  Sig, PubKey, SigHashPreimage, checkSig, checkPreimage,
+  StatefulSmartContract, assert, Sig, PubKey, SigHashPreimage,
+  checkSig, checkPreimage, extractOutputHash, hash256,
 } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
-  @state count: bigint;
+  count: bigint;
 
-  constructor(count: bigint) {
-    super(count);
-    this.count = count;
+  constructor() {
+    super();
+    this.count = 0n;
   }
 
-  public increment(sig: Sig, pubKey: PubKey, preimage: SigHashPreimage) {
-    assert(checkPreimage(preimage));
-    assert(checkSig(sig, pubKey));
+  public increment(sig: Sig, owner: PubKey, txPreimage: SigHashPreimage) {
+    assert(checkPreimage(txPreimage));
+    assert(checkSig(sig, owner));
 
-    // Update state -- this triggers recursive covenant enforcement
-    this.count += 1n;
+    // Update state
+    this.count = this.count + 1n;
 
-    // The compiler injects code here to verify the output
-    // contains this contract with count = count + 1
-    assert(this.updateState(preimage));
+    // Enforce the spending transaction creates a new UTXO with updated state
+    this.addOutput(1n, this.count);
+    const expectedHash = hash256(this.getStateScript());
+    assert(extractOutputHash(txPreimage) === expectedHash);
   }
 }
 ```
 
-The `updateState` call is where the recursion happens. It serializes the new state, constructs the expected output script, and verifies it against the spending transaction's outputs.
+The `addOutput` + `extractOutputHash` pattern is where the recursion happens. The contract serializes its new state, constructs the expected output script, hashes it, and verifies that the spending transaction's `hashOutputs` field matches. If it does, the miner guarantees that the new UTXO contains this contract with updated state.
 
 ## Building Unbounded State Machines
 
-Recursive covenants enable contracts that function as state machines with arbitrary lifetimes. Each transaction is a state transition:
+Recursive covenants enable contracts that function as state machines with arbitrary lifetimes. Each transaction is a state transition.
+
+A more complex example -- an auction contract where `bid` is recursive (keeps the contract alive) and `close` is terminal (ends the contract's lifecycle):
 
 ```typescript
+import {
+  StatefulSmartContract, assert, PubKey, Sig, SigHashPreimage,
+  checkSig, checkPreimage, extractOutputHash, extractLocktime, hash256,
+} from 'runar-lang';
+
 class Auction extends StatefulSmartContract {
-  @state highestBidder: PubKey;
-  @state highestBid: bigint;
-  @state deadline: bigint;
+  readonly auctioneer: PubKey;
+  readonly deadline: bigint;
+  highBidder: PubKey;
+  highBid: bigint;
 
-  public bid(
-    bidder: PubKey, bidAmount: bigint,
-    sig: Sig, preimage: SigHashPreimage
-  ) {
-    assert(checkPreimage(preimage));
-    assert(bidAmount > this.highestBid);
-
-    // Refund previous highest bidder (second output)
-    // Accept new bid (update state in first output)
-    this.highestBidder = bidder;
-    this.highestBid = bidAmount;
-    assert(this.updateState(preimage));
+  constructor(auctioneer: PubKey, deadline: bigint, highBidder: PubKey, highBid: bigint) {
+    super(auctioneer, deadline, highBidder, highBid);
+    this.auctioneer = auctioneer;
+    this.deadline = deadline;
+    this.highBidder = highBidder;
+    this.highBid = highBid;
   }
 
-  public finalize(sig: Sig, preimage: SigHashPreimage) {
-    assert(checkPreimage(preimage));
-    const locktime = extractLocktime(preimage);
-    assert(locktime >= this.deadline);
+  public bid(bidder: PubKey, amount: bigint, txPreimage: SigHashPreimage) {
+    assert(checkPreimage(txPreimage));
+    assert(amount > this.highBid);
+    assert(extractLocktime(txPreimage) < this.deadline);
 
-    // Final state transition: pay the auction seller
-    // No updateState call -- the contract terminates
-    assert(checkSig(sig, this.highestBidder));
+    // Update state -- recursive: the contract continues with new highest bid
+    this.highBidder = bidder;
+    this.highBid = amount;
+
+    this.addOutput(amount, this.auctioneer, this.deadline, this.highBidder, this.highBid);
+    const expectedHash = hash256(this.getStateScript());
+    assert(extractOutputHash(txPreimage) === expectedHash);
+  }
+
+  public close(sig: Sig) {
+    // Terminal: no addOutput call, so the contract ends here
+    assert(checkSig(sig, this.auctioneer));
   }
 }
 ```
 
-The `bid` method is recursive: it keeps the contract alive with updated state. The `finalize` method is terminal: it does not call `updateState`, so the contract's life ends and funds are released.
+The `bid` method is recursive: it keeps the contract alive with updated state. The `close` method is terminal: it does not call `addOutput`, so the contract's life ends and funds are released.
 
 ### State Machine Design Patterns
 
-**Terminal transitions.** Not every method needs to be recursive. Methods that end the contract's lifecycle skip `updateState` and instead enforce a final output (like paying a winner).
+**Terminal transitions.** Not every method needs to be recursive. Methods that end the contract's lifecycle skip `addOutput` and instead enforce a final output condition (like paying a winner) or simply verify authorization.
 
-**Guard conditions.** Use preimage fields to enforce when transitions are valid. Check locktime for time-based guards, or use sequence numbers for relative timelocks.
+**Guard conditions.** Use preimage fields to enforce when transitions are valid. Check `extractLocktime(txPreimage)` for time-based guards, or use `extractSequence(txPreimage)` for relative timelocks.
 
-**Multi-party state.** Multiple parties can drive transitions by requiring different signatures for different methods. The contract state tracks whose turn it is.
+**Multi-party state.** Multiple parties can drive transitions by requiring different signatures for different methods. The TicTacToe contract in the [examples](/docs/examples/token-swap) demonstrates this pattern: Alice and Bob take turns, with the contract tracking whose turn it is as state.
 
 ## Introduction to ZK Proofs on BSV
 
-Zero-knowledge proofs allow one party (the prover) to convince another (the verifier) that a statement is true without revealing any information beyond the truth of the statement itself. On BSV, ZK proofs are verified in Bitcoin Script.
+Zero-knowledge proofs allow one party (the prover) to convince another (the verifier) that a statement is true without revealing any information beyond the truth of the statement itself. On BSV, ZK proofs are verified in Bitcoin Script using the elliptic curve operations that Rúnar exposes.
 
-Runar supports Schnorr-based zero-knowledge proofs using the elliptic curve operations available in BSV script.
+### EC Operations in Rúnar
 
-### EC Operations in Runar
-
-Runar exposes the following elliptic curve primitives from `runar-lang`:
+Rúnar provides the following elliptic curve primitives, all imported from `runar-lang`:
 
 | Function | Description |
 |----------|-------------|
@@ -122,13 +134,17 @@ Runar exposes the following elliptic curve primitives from `runar-lang`:
 | `ecMulGen(scalar)` | Multiply the generator point G by a scalar |
 | `ecNegate(point)` | Negate an EC point (reflect over x-axis) |
 | `ecOnCurve(point)` | Check if a point is on the secp256k1 curve |
-| `ecModReduce(value)` | Reduce a value modulo the curve order N |
+| `ecModReduce(value, mod)` | Reduce a value modulo the given modulus |
+| `ecEncodeCompressed(point)` | Encode a point as 33-byte compressed public key |
+| `ecMakePoint(x, y)` | Construct a point from x and y coordinates |
+| `ecPointX(point)` | Extract the x-coordinate of a point |
+| `ecPointY(point)` | Extract the y-coordinate of a point |
 
-These operations work on `Point` types, which represent points on the secp256k1 elliptic curve.
+These operations work on `Point` types (64 bytes: 32-byte x + 32-byte y) on the secp256k1 curve.
 
 ## Schnorr ZK Proofs
 
-A Schnorr zero-knowledge proof proves knowledge of a discrete logarithm -- that is, knowing a secret `x` such that `X = x * G` -- without revealing `x`.
+A Schnorr zero-knowledge proof proves knowledge of a discrete logarithm -- knowing a secret `x` such that `X = x * G` -- without revealing `x`.
 
 ### The Protocol
 
@@ -137,9 +153,11 @@ A Schnorr zero-knowledge proof proves knowledge of a discrete logarithm -- that 
 3. **Prover** computes `s = k + e * x`, sends `s` to verifier
 4. **Verifier** checks that `s * G == R + e * X`
 
-In a non-interactive setting (Fiat-Shamir heuristic), the challenge `e` is derived as a hash of the commitment and public data.
+In a non-interactive setting (Fiat-Shamir heuristic), the challenge `e` is derived as a hash of the commitment and public data, eliminating the need for interaction.
 
 ### SchnorrZKP Contract
+
+This contract verifies that the caller knows the discrete logarithm of `publicPoint` without the secret ever appearing on-chain:
 
 ```typescript
 import {
@@ -148,7 +166,7 @@ import {
 } from 'runar-lang';
 
 class SchnorrZKP extends SmartContract {
-  readonly publicPoint: Point; // X = x * G (public key)
+  readonly publicPoint: Point; // X = x * G (the public commitment)
 
   constructor(publicPoint: Point) {
     super(publicPoint);
@@ -156,16 +174,16 @@ class SchnorrZKP extends SmartContract {
   }
 
   public verifyProof(
-    commitR: Point, // R = k * G
-    responseS: bigint, // s = k + e * x
+    commitR: Point,     // R = k * G (the nonce commitment)
+    responseS: bigint,  // s = k + e * x (the proof response)
   ) {
-    // Verify R is on the curve
+    // Verify the commitment point is on the curve
     assert(ecOnCurve(commitR));
 
-    // Derive challenge: e = H(R || X)
+    // Derive the challenge using Fiat-Shamir: e = H(R || X)
     const e = sha256(commitR + this.publicPoint);
 
-    // Verify: s * G == R + e * X
+    // Verify the Schnorr equation: s * G == R + e * X
     const lhs = ecMulGen(responseS);
     const rhs = ecAdd(commitR, ecMul(this.publicPoint, e));
     assert(lhs === rhs);
@@ -173,73 +191,104 @@ class SchnorrZKP extends SmartContract {
 }
 ```
 
-This contract verifies that the caller knows the discrete logarithm of `publicPoint` without the secret ever appearing on-chain.
+The prover constructs the proof off-chain by choosing a random nonce `k`, computing `R = k * G`, deriving `e = sha256(R || X)`, and computing `s = k + e * x`. The contract verifies the proof algebraically using only EC point operations.
+
+### Proof Size
+
+Schnorr proofs are compact: one `Point` (64 bytes) + one `bigint` scalar (~32 bytes) = approximately 96 bytes of unlocking script data. This makes them practical for on-chain verification, unlike SNARKs or STARKs which would require megabytes of script.
 
 ## OPRF-Based Convergence Proofs
 
-An Oblivious Pseudo-Random Function (OPRF) can be used to prove that two parties have converged on the same secret input without revealing it. This pattern uses EC point subtraction (via negation and addition) to create a fraud signal:
+An Oblivious Pseudo-Random Function (OPRF) can prove that two parties have converged on the same secret input without revealing it. This pattern uses EC point subtraction (via negation and addition) to detect agreement:
 
 ```typescript
+import {
+  SmartContract, assert, Point, ecAdd, ecNegate,
+} from 'runar-lang';
+
 class ConvergenceProof extends SmartContract {
-  readonly expectedDelta: Point; // Pre-committed difference
+  readonly expectedDelta: Point; // Pre-committed blinding factor difference
+
+  constructor(expectedDelta: Point) {
+    super(expectedDelta);
+    this.expectedDelta = expectedDelta;
+  }
 
   public proveConvergence(
     pointA: Point, // OPRF output from party A
     pointB: Point, // OPRF output from party B
   ) {
     // If both parties used the same input, their OPRF outputs
-    // will differ by a known constant (the blinding factor difference)
+    // differ by a known constant (the blinding factor difference).
+    // delta = pointA - pointB (implemented as pointA + (-pointB))
     const delta = ecAdd(pointA, ecNegate(pointB));
     assert(delta === this.expectedDelta);
   }
 }
 ```
 
-This pattern is useful for fraud detection, duplicate spend detection, and multi-party computation protocols.
+This pattern is useful for fraud detection, duplicate spend detection, and multi-party computation protocols where parties must prove they used consistent inputs.
 
-## Combining Recursion and Zero-Knowledge Techniques
+## Combining Recursion and ZK
 
-The most powerful patterns combine recursive covenants with ZK proofs. For example, a private voting contract where:
-
-1. The contract maintains a tally as state (recursive)
-2. Each vote proves eligibility via a ZK proof (zero-knowledge)
-3. The vote itself is committed but not revealed (privacy)
+The most powerful patterns combine recursive covenants with zero-knowledge proofs. For example, a contract that maintains a cumulative commitment as state, where each transition adds a new ZK-verified contribution:
 
 ```typescript
-class PrivateVote extends StatefulSmartContract {
-  @state yesCount: bigint;
-  @state noCount: bigint;
-  @state voterCommitments: Sha256; // Merkle root of eligible voters
+import {
+  StatefulSmartContract, assert, Point, Sha256, SigHashPreimage,
+  ecMulGen, ecAdd, ecMul, ecOnCurve, sha256, checkPreimage,
+  extractOutputHash, hash256,
+} from 'runar-lang';
 
-  public castVote(
-    voteCommitment: Sha256,
-    eligibilityProof: Point,
-    proofResponse: bigint,
-    preimage: SigHashPreimage,
+class CommitmentAccumulator extends StatefulSmartContract {
+  readonly verifierPoint: Point;  // Known public point for verification
+  accumulator: Point;             // Cumulative EC point commitment
+
+  constructor(verifierPoint: Point, accumulator: Point) {
+    super(verifierPoint, accumulator);
+    this.verifierPoint = verifierPoint;
+    this.accumulator = accumulator;
+  }
+
+  public addCommitment(
+    commitR: Point,
+    responseS: bigint,
+    txPreimage: SigHashPreimage,
   ) {
-    assert(checkPreimage(preimage));
+    assert(checkPreimage(txPreimage));
+    assert(ecOnCurve(commitR));
 
-    // Verify voter eligibility via Schnorr ZK proof
-    // (proves membership in the voter set without revealing identity)
-    assert(ecOnCurve(eligibilityProof));
-    const challenge = sha256(eligibilityProof + this.voterCommitments);
-    const lhs = ecMulGen(proofResponse);
-    const rhs = ecAdd(eligibilityProof, ecMul(ecMulGen(1n), challenge));
+    // Verify the Schnorr proof: caller knows a secret
+    const e = sha256(commitR + this.verifierPoint);
+    const lhs = ecMulGen(responseS);
+    const rhs = ecAdd(commitR, ecMul(this.verifierPoint, e));
     assert(lhs === rhs);
 
-    // Update tally (vote value is derived from commitment)
-    // In practice, you would use a more sophisticated commitment scheme
-    this.yesCount += 1n;
+    // Add the commitment to the accumulator (recursive state update)
+    this.accumulator = ecAdd(this.accumulator, commitR);
 
-    assert(this.updateState(preimage));
+    // Enforce state continuation
+    this.addOutput(1n, this.verifierPoint, this.accumulator);
+    const expectedHash = hash256(this.getStateScript());
+    assert(extractOutputHash(txPreimage) === expectedHash);
   }
 }
 ```
 
+Each call to `addCommitment` verifies a ZK proof and then accumulates the commitment into the contract's state. The contract lives indefinitely, collecting verified contributions.
+
 ### Design Considerations
 
-**Proof size.** Schnorr proofs are compact (one point + one scalar = ~65 bytes), making them practical for on-chain verification. More complex proof systems (SNARKs, STARKs) are not currently feasible in Bitcoin Script due to script size constraints.
-
-**Recursion depth.** There is no protocol-level limit on recursion depth. A recursive covenant can live for millions of transactions. However, each transition is a separate transaction with its own fees.
+**Recursion depth.** There is no protocol-level limit on recursion depth. A recursive covenant can live for millions of transactions. Each transition is a separate transaction with its own fees.
 
 **State size.** Each state field adds to the script size, which increases fees. Keep state minimal. Use Merkle trees or hash commitments to compress large state into a single `Sha256`.
+
+**Script size.** EC operations compile to large scripts. A single `ecMul` can produce several kilobytes of opcodes. Contracts combining multiple EC operations and state continuation can exceed 50KB. Monitor compiled script size with `runar compile --asm` and keep EC operations to the minimum required.
+
+**Termination.** Every recursive contract should have at least one terminal method (a method that does not call `addOutput`) so that funds can eventually be withdrawn. A contract with no terminal method locks funds permanently.
+
+## Further Reading
+
+- [Covenant Architecture](/docs/advanced/covenant-architecture) -- foundational covenant patterns and OP_PUSH_TX mechanics
+- [Security Considerations](/docs/advanced/security-considerations) -- affine types, eager evaluation, and post-quantum cryptography
+- [Stateful Contracts](/docs/sdk/inductive-contracts) -- SDK-level guide to deploying and calling stateful contracts

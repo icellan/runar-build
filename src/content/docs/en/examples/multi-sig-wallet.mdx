@@ -216,71 +216,73 @@ Both parties can mutually cancel the bet and split the funds. This is a safety v
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('BlackjackBet', () => {
-  const playerKey = bsv.PrivateKey.fromRandom('testnet');
-  const houseKey = bsv.PrivateKey.fromRandom('testnet');
-  const playerPub = playerKey.toPublicKey().toString();
-  const housePub = houseKey.toPublicKey().toString();
+  const source = readFileSync('./src/contracts/BlackjackBet.runar.ts', 'utf-8');
 
+  // ALICE = player, BOB = house
   const oraclePubKey = 123456789n; // Rabin public key (simplified for test)
   const betAmount = 10000n;
 
-  it('should allow house to settle a loss', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/BlackjackBet.runar.ts',
-      'BlackjackBet'
-    );
-    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+  it('should allow house to settle a loss', () => {
+    const contract = TestContract.fromSource(source, {
+      player: ALICE.pubKey,
+      house: BOB.pubKey,
+      oraclePubKey,
+      betAmount,
+    });
 
-    const result = await instance.call('settleLoss', {
-      houseSig: instance.sign(houseKey),
+    const result = contract.call('settleLoss', {
+      houseSig: BOB.privKey,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject loss settlement by non-house', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/BlackjackBet.runar.ts',
-      'BlackjackBet'
-    );
-    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+  it('should reject loss settlement by non-house', () => {
+    const contract = TestContract.fromSource(source, {
+      player: ALICE.pubKey,
+      house: BOB.pubKey,
+      oraclePubKey,
+      betAmount,
+    });
 
-    const result = await instance.call('settleLoss', {
-      houseSig: instance.sign(playerKey),
+    const result = contract.call('settleLoss', {
+      houseSig: ALICE.privKey,
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should allow mutual cancellation', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/BlackjackBet.runar.ts',
-      'BlackjackBet'
-    );
-    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+  it('should allow mutual cancellation', () => {
+    const contract = TestContract.fromSource(source, {
+      player: ALICE.pubKey,
+      house: BOB.pubKey,
+      oraclePubKey,
+      betAmount,
+    });
 
-    const result = await instance.call('cancel', {
-      playerSig: instance.sign(playerKey),
-      houseSig: instance.sign(houseKey),
+    const result = contract.call('cancel', {
+      playerSig: ALICE.privKey,
+      houseSig: BOB.privKey,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject cancel with only one signature', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/BlackjackBet.runar.ts',
-      'BlackjackBet'
-    );
-    const instance = contract.create(playerPub, housePub, oraclePubKey, betAmount);
+  it('should reject cancel with only one signature', () => {
+    const contract = TestContract.fromSource(source, {
+      player: ALICE.pubKey,
+      house: BOB.pubKey,
+      oraclePubKey,
+      betAmount,
+    });
 
-    const result = await instance.call('cancel', {
-      playerSig: instance.sign(playerKey),
-      houseSig: instance.sign(playerKey),
+    const result = contract.call('cancel', {
+      playerSig: ALICE.privKey,
+      houseSig: ALICE.privKey,
     });
 
     expect(result.success).toBe(false);

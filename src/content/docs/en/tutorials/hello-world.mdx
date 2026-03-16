@@ -42,14 +42,13 @@ hello-world/
   artifacts/       # Compiled JSON artifacts (generated)
   package.json
   tsconfig.json
-  runar.config.ts
 ```
 
-The `contracts/` directory is where your contract source lives. The `tests/` directory is pre-configured with vitest. The `artifacts/` directory will be populated when you compile.
+The `src/contracts/` directory is where your contract source lives. The `tests/` directory is pre-configured with vitest. The `artifacts/` directory will be populated when you compile.
 
 ## Writing the Hello World Contract
 
-Create a new file at `contracts/P2PKH.runar.ts`. This implements Pay-to-Public-Key-Hash, the standard Bitcoin pattern where funds can only be spent by proving ownership of the private key that corresponds to a given public key hash.
+Create a new file at `src/contracts/P2PKH.runar.ts`. This implements Pay-to-Public-Key-Hash, the standard Bitcoin pattern where funds can only be spent by proving ownership of the private key that corresponds to a given public key hash.
 
 ```typescript
 import {
@@ -148,7 +147,7 @@ The compiled artifact is a JSON file containing everything needed to deploy and 
 
 ```json
 {
-  "version": 1,
+  "version": "runar-v0.1.0",
   "compilerVersion": "0.1.0",
   "contractName": "P2PKH",
   "abi": {
@@ -186,81 +185,53 @@ Create a test file at `tests/P2PKH.test.ts`:
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('P2PKH', () => {
-  it('should unlock with correct key pair', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/P2PKH.runar.ts',
-      'P2PKH'
-    );
+  const source = readFileSync('./src/contracts/P2PKH.runar.ts', 'utf-8');
 
-    // Generate a test key pair
-    const privateKey = bsv.PrivateKey.fromRandom('testnet');
-    const publicKey = privateKey.toPublicKey();
-    const pubKeyHash = bsv.crypto.Hash.sha256ripemd160(
-      publicKey.toBuffer()
-    ).toString('hex');
-
-    // Create a contract instance with the public key hash
-    const instance = contract.create(pubKeyHash);
+  it('should unlock with correct key pair', () => {
+    const contract = TestContract.fromSource(source, {
+      pubKeyHash: ALICE.pubKeyHash,
+    });
 
     // Unlock should succeed with matching key pair
-    const result = await instance.call('unlock', {
-      sig: instance.sign(privateKey),
-      pubKey: publicKey.toString(),
+    const result = contract.call('unlock', {
+      sig: ALICE.privKey,
+      pubKey: ALICE.pubKey,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should fail with wrong key pair', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/P2PKH.runar.ts',
-      'P2PKH'
-    );
-
-    const correctKey = bsv.PrivateKey.fromRandom('testnet');
-    const wrongKey = bsv.PrivateKey.fromRandom('testnet');
-    const pubKeyHash = bsv.crypto.Hash.sha256ripemd160(
-      correctKey.toPublicKey().toBuffer()
-    ).toString('hex');
-
-    const instance = contract.create(pubKeyHash);
+  it('should fail with wrong key pair', () => {
+    const contract = TestContract.fromSource(source, {
+      pubKeyHash: ALICE.pubKeyHash,
+    });
 
     // Unlock should fail when signed with wrong key
-    const result = await instance.call('unlock', {
-      sig: instance.sign(wrongKey),
-      pubKey: wrongKey.toPublicKey().toString(),
+    const result = contract.call('unlock', {
+      sig: BOB.privKey,
+      pubKey: BOB.pubKey,
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should fail when pubKey does not match hash', async () => {
-    const contract = await TestContract.fromSource(
-      'contracts/P2PKH.runar.ts',
-      'P2PKH'
-    );
-
-    const keyA = bsv.PrivateKey.fromRandom('testnet');
-    const keyB = bsv.PrivateKey.fromRandom('testnet');
-
-    // Lock to keyA's hash
-    const pubKeyHash = bsv.crypto.Hash.sha256ripemd160(
-      keyA.toPublicKey().toBuffer()
-    ).toString('hex');
-
-    const instance = contract.create(pubKeyHash);
-
-    // Sign correctly with keyB, but provide keyB's pubKey (wrong hash)
-    const result = await instance.call('unlock', {
-      sig: instance.sign(keyB),
-      pubKey: keyB.toPublicKey().toString(),
+  it('should fail when pubKey does not match hash', () => {
+    // Lock to ALICE's hash
+    const contract = TestContract.fromSource(source, {
+      pubKeyHash: ALICE.pubKeyHash,
     });
 
-    // Signature is valid for keyB, but hash160(keyB) !== pubKeyHash
+    // Sign correctly with BOB, but provide BOB's pubKey (wrong hash)
+    const result = contract.call('unlock', {
+      sig: BOB.privKey,
+      pubKey: BOB.pubKey,
+    });
+
+    // Signature is valid for BOB, but hash160(BOB.pubKey) !== pubKeyHash
     expect(result.success).toBe(false);
   });
 });

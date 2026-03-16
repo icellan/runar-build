@@ -1,0 +1,298 @@
+---
+title: "Code Generation"
+description: "Generating typed contract wrappers from compiled artifacts."
+section: "sdk"
+order: 70
+lang: "en"
+---
+
+The Runar code generation system produces typed wrapper classes from compiled artifact JSON files. Instead of calling `RunarContract` methods with raw string arrays and untyped arguments, you get a class with proper types for every constructor parameter and public method. The wrappers handle parameter marshalling, signature placeholders, and output resolution internally.
+
+## CLI Usage
+
+Generate wrappers with the `runar codegen` command:
+
+```bash
+runar codegen <artifacts...> [-o <dir>] [-l <lang>]
+```
+
+**Arguments:**
+
+| Argument | Description |
+| -------- | ----------- |
+| `<artifacts...>` | One or more artifact JSON files. Supports glob patterns. |
+
+**Options:**
+
+| Flag | Description | Default |
+| ---- | ----------- | ------- |
+| `-o, --output <dir>` | Output directory for generated files. | Same directory as the artifact |
+| `-l, --lang <lang>` | Target language. | `ts` |
+
+**Supported languages:** `ts`, `go`, `rust`, `python`
+
+### Examples
+
+Generate a TypeScript wrapper next to the artifact:
+
+```bash
+runar codegen ./artifacts/Escrow.json
+```
+
+Generate Go wrappers for all artifacts into a specific directory:
+
+```bash
+runar codegen ./artifacts/*.json -o ./generated -l go
+```
+
+### Output File Naming
+
+The output filename is derived from the `contractName` field in the artifact:
+
+| Language | Naming convention | Example |
+| -------- | ----------------- | ------- |
+| `ts` | PascalCase + `Contract` | `EscrowContract.ts` |
+| `go` | snake_case + `_contract` | `escrow_contract.go` |
+| `rust` | snake_case + `_contract` | `escrow_contract.rs` |
+| `python` | snake_case + `_contract` | `escrow_contract.py` |
+
+## Programmatic API
+
+The code generation functions are exported from `runar-sdk` for use in build scripts and tooling.
+
+### TypeScript Generation (Imperative)
+
+The primary TypeScript generator builds the wrapper using an imperative string-builder approach:
+
+```typescript
+import { generateTypescript } from 'runar-sdk';
+import artifact from './artifacts/Escrow.json';
+
+const code = generateTypescript(artifact);
+```
+
+`generateTypescript(artifact: RunarArtifact): string` accepts a compiled artifact and returns the full TypeScript source code for a typed wrapper class.
+
+### Template-Based Generators
+
+Go, Rust, and Python wrappers are generated using Mustache templates. Each function accepts a `RunarArtifact` and returns the generated source code as a string:
+
+```typescript
+import {
+  generateGo,
+  generateRust,
+  generatePython,
+  generateTypescriptFromTemplate,
+} from 'runar-sdk';
+
+const goCode = generateGo(artifact);
+const rustCode = generateRust(artifact);
+const pythonCode = generatePython(artifact);
+
+// There is also a template-based TypeScript generator
+// (the imperative generator is the default used by the CLI)
+const tsFromTemplate = generateTypescriptFromTemplate(artifact);
+```
+
+All four template-based generators work the same way internally: they call `buildCodegenContext(artifact, lang)` to analyze the artifact and produce a context object, then render a Mustache template (`wrapper.<ext>.mustache`) with that context.
+
+### Analysis Utilities
+
+The codegen module also exports lower-level utilities for inspecting artifacts programmatically:
+
+| Function | Description |
+| -------- | ----------- |
+| `getPublicMethods(artifact)` | Returns the artifact's public ABI methods (those with `isPublic: true`). |
+| `isStatefulArtifact(artifact)` | Returns `true` if the artifact has `stateFields`. |
+| `isTerminalMethod(method, isStateful)` | Returns `true` if a method is terminal (no state continuation). |
+| `classifyParams(method, isStateful)` | Classifies each parameter as user-visible or hidden (auto-computed by the SDK). |
+| `getUserParams(method, isStateful)` | Returns only user-visible parameters. |
+| `getSdkArgParams(method, isStateful)` | Returns parameters matching the SDK's args array (excludes `SigHashPreimage`, `_changePKH`, `_changeAmount`, `_newAmount` for stateful contracts). |
+| `safeMethodName(name)` | Returns a safe method name, prefixing with `call` if the name collides with wrapper class methods (`connect`, `deploy`, `contract`). |
+| `mapTypeToTS(abiType)` | Maps an ABI type string to a TypeScript type. |
+| `mapTypeToGo(abiType)` | Maps an ABI type string to a Go type. |
+| `mapTypeToRust(abiType)` | Maps an ABI type string to a Rust type. |
+| `mapTypeToPython(abiType)` | Maps an ABI type string to a Python type. |
+| `buildCodegenContext(artifact, lang)` | Builds a full `CodegenContext` for a given target language, used by the Mustache templates. |
+| `renderMustache(template, context)` | Renders a Mustache template string with a context object. |
+
+## What Gets Generated
+
+A generated wrapper class provides:
+
+1. **A typed constructor** that accepts the contract's constructor parameters as a named object (or no arguments if there are none), and creates the underlying `RunarContract`.
+2. **`fromUtxo` and `fromTxId` static methods** for reconnecting to existing on-chain contract UTXOs.
+3. **`connect(provider, signer)`** to store a provider and signer for implicit use.
+4. **`deploy()`** with overloads that accept either pre-connected provider/signer or explicit ones.
+5. **`deployWithWallet()`** for BRC-100 wallet integration (TypeScript only).
+6. **`getLockingScript()`** to retrieve the fully resolved locking script hex.
+7. **A `contract` accessor** that returns the underlying `RunarContract` for advanced use.
+8. **A typed method for each public ABI method** with correct parameter types and appropriate call options.
+
+### Stateful vs. Terminal Methods
+
+For stateful contracts, the codegen system distinguishes between two kinds of methods:
+
+- **State-mutating methods** accept an optional options object (`StatefulCallOptions`) that lets you control satoshis, change address, and new state.
+- **Terminal methods** accept an array of `TerminalOutput` objects specifying where funds should go when the contract is spent.
+
+The generator determines whether a method is terminal by checking the `isTerminal` flag on the ABI method (falling back to checking for the absence of `_changePKH` in older artifacts).
+
+### Multi-Signer Support
+
+For methods that have `Sig` parameters, the generator produces additional `prepare` and `finalize` methods. This enables multi-signer workflows where the transaction is built first, sent to external signers, and finalized with collected signatures.
+
+- `prepare<Method>(...)` returns a `PreparedCall` with the unsigned transaction.
+- `finalize<Method>(prepared, ...signatures)` completes the transaction with the provided signatures.
+
+`Sig` parameters are excluded from the user-facing method signature. In the args array passed to the SDK, they are represented as `null` and auto-computed during signing.
+
+### Hidden Parameters
+
+The codegen system classifies several parameter types as "hidden" -- they do not appear in the generated method signatures because the SDK computes them automatically:
+
+| Parameter | Reason |
+| --------- | ------ |
+| `Sig` | Auto-computed by the SDK's two-pass signing. Passed as `null` in the args array. |
+| `SigHashPreimage` | Auto-computed for stateful contracts. Excluded from the args array entirely. |
+| `_changePKH` | Injected by the SDK for stateful change outputs. Excluded from args. |
+| `_changeAmount` | Injected by the SDK for stateful change outputs. Excluded from args. |
+| `_newAmount` | Injected by the SDK for stateful contracts. Excluded from args. |
+
+## TypeScript Example
+
+Given a P2PKH contract with a `pubKeyHash` constructor parameter and an `unlock` method taking `sig: Sig` and `pubKey: PubKey`, the generated TypeScript wrapper looks like this:
+
+```typescript
+// Generated by: runar codegen
+// Source: P2PKH
+// Do not edit manually.
+
+import { RunarContract, buildP2PKHScript } from 'runar-sdk';
+import type {
+  Provider, Signer, TransactionData, DeployOptions,
+  RunarArtifact, PreparedCall,
+} from 'runar-sdk';
+
+type CallResult = { txid: string; tx: TransactionData };
+
+export interface TerminalOutput {
+  satoshis: number;
+  address?: string;
+  scriptHex?: string;
+}
+
+export class P2PKHContract {
+  private readonly inner: RunarContract;
+
+  constructor(
+    artifact: RunarArtifact,
+    args: {
+      pubKeyHash: string;
+    },
+  ) {
+    this.inner = new RunarContract(artifact, [args.pubKeyHash]);
+  }
+
+  // ... fromUtxo, fromTxId, connect, deploy, getLockingScript ...
+
+  async unlock(pubKey: string | null, outputs?: TerminalOutput[]): Promise<CallResult> {
+    const callOpts = outputs
+      ? { terminalOutputs: P2PKHContract.resolveOutputs(outputs) }
+      : undefined;
+    return this.inner.call('unlock', [null, pubKey], callOpts);
+  }
+
+  async prepareUnlock(pubKey: string | null, outputs?: TerminalOutput[]): Promise<PreparedCall> {
+    const callOpts = outputs
+      ? { terminalOutputs: P2PKHContract.resolveOutputs(outputs) }
+      : undefined;
+    return this.inner.prepareCall('unlock', [null, pubKey], callOpts);
+  }
+
+  async finalizeUnlock(prepared: PreparedCall, sig: string): Promise<CallResult> {
+    return this.inner.finalizeCall(prepared, { 0: sig });
+  }
+}
+```
+
+Notice that `sig` does not appear in the `unlock` method signature -- it is passed as `null` in the args array and auto-computed by the SDK. The `prepareUnlock`/`finalizeUnlock` pair enables external signing workflows.
+
+## Using a Generated Wrapper
+
+Once generated, import the wrapper alongside the artifact JSON:
+
+```typescript
+import { WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import artifact from './artifacts/P2PKH.json';
+import { P2PKHContract } from './generated/P2PKHContract';
+
+// Instantiate with typed constructor args
+const contract = new P2PKHContract(artifact, {
+  pubKeyHash: '89abcdef01234567890abcdef01234567890abcd',
+});
+
+// Connect and deploy
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('cN3L4FfPt...');
+contract.connect(provider, signer);
+
+const { txid } = await contract.deploy({ satoshis: 10000 });
+console.log('Deployed:', txid);
+
+// Call with typed method
+const result = await contract.unlock(signer.publicKey, [
+  { address: 'mrecipient...', satoshis: 9500 },
+]);
+console.log('Spent:', result.txid);
+```
+
+To reconnect to an existing contract in a later session:
+
+```typescript
+const contract = await P2PKHContract.fromTxId(
+  artifact,
+  'a1b2c3d4...',
+  0,
+  provider,
+);
+contract.connect(provider, signer);
+```
+
+## Type Mappings
+
+The following table shows how ABI types are mapped to each target language:
+
+| ABI Type | TypeScript | Go | Rust | Python |
+| -------- | ---------- | -- | ---- | ------ |
+| `bigint` | `bigint` | `*big.Int` | `BigInt` | `int` |
+| `boolean` | `boolean` | `bool` | `bool` | `bool` |
+| `Sig` | `string \| null` | `string` | `String` | `str` |
+| `PubKey` | `string \| null` | `string` | `String` | `str` |
+| `ByteString` | `string` | `string` | `String` | `str` |
+| `Addr` | `string` | `string` | `String` | `str` |
+| `Ripemd160` | `string` | `string` | `String` | `str` |
+| `Sha256` | `string` | `string` | `String` | `str` |
+| `Point` | `string` | `string` | `String` | `str` |
+| `SigHashPreimage` | `string \| null` | `string` | `String` | `str` |
+
+Unknown types fall back to `unknown` (TypeScript), `interface{}` (Go), `SdkValue` (Rust), or `Any` (Python).
+
+## Template System
+
+The Go, Rust, and Python generators use Mustache templates stored in `codegen/templates/`. The template engine is a minimal built-in renderer (`renderMustache`) that supports:
+
+- `{{variable}}` -- Variable interpolation (no HTML escaping).
+- `{{#section}}...{{/section}}` -- Conditional/iterable sections. Arrays are iterated; truthy values render the block.
+- `{{^section}}...{{/section}}` -- Inverted sections. Renders when the value is falsy or an empty array.
+- `{{.}}` -- Current item in a primitive array iteration.
+
+There are no partials, no lambdas, and no HTML escaping -- the renderer is purpose-built for code generation.
+
+The templates consume a `CodegenContext` object built by `buildCodegenContext(artifact, lang)`. This context contains the contract name, constructor parameters, all public methods with their classified parameters, and precomputed expressions for args arrays and signature maps.
+
+## What's Next
+
+- [Calling a Contract](/docs/en/sdk/calling) -- How the `call()` method works under the hood
+- [Multi-Signer Workflows](/docs/en/sdk/multi-signer) -- Deep dive into `prepareCall` and `finalizeCall`
+- [CLI Reference](/docs/en/api-reference/cli-reference) -- Full reference for all `runar` CLI commands

@@ -1,16 +1,16 @@
 ---
-title: "Inductive (Stateful) Contracts"
+title: "Stateful Contracts"
 description: "Building state machines with UTXOs."
 section: "sdk"
 order: 40
 lang: "en"
 ---
 
-Inductive contracts maintain state across multiple transactions by enforcing that each spend creates a new UTXO with an updated state. This pattern turns a chain of UTXOs into an on-chain state machine.
+Stateful contracts maintain state across multiple transactions by enforcing that each spend creates a new UTXO with an updated state. This pattern turns a chain of UTXOs into an on-chain state machine.
 
-## What Makes a Contract Inductive
+## What Makes a Contract Stateful
 
-A standard (stateless) contract is a one-shot lock: once its UTXO is spent, the contract is gone. An inductive (stateful) contract enforces that the spending transaction creates a **continuation output** -- a new UTXO locked by the same contract script but with updated state.
+A standard (stateless) contract is a one-shot lock: once its UTXO is spent, the contract is gone. A stateful contract enforces that the spending transaction creates a **continuation output** -- a new UTXO locked by the same contract script but with updated state.
 
 This creates a chain of UTXOs:
 
@@ -22,30 +22,31 @@ Deploy TX         Call TX #1         Call TX #2
 
 Each UTXO in the chain carries the full contract logic plus serialized state. The contract itself verifies that the output of the spending transaction is correctly formed -- this is the **covenant** property.
 
-In Runar, inductive contracts extend `StatefulSmartContract` instead of `SmartContract`:
+In Runar, stateful contracts extend `StatefulSmartContract` instead of `SmartContract`:
 
 ```typescript
-import {
-  StatefulSmartContract,
-  assert,
-  SigHashPreimage,
-} from 'runar-lang';
+import { StatefulSmartContract, assert } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
   count: bigint;
 
-  constructor() {
-    super();
-    this.count = 0n;
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
   }
 
-  public increment(preimage: SigHashPreimage) {
-    this.count = this.count + 1n;
-    this.addOutput(this.ctx.utxo.satoshis, this.count);
-    assert(this.checkPreimage(preimage));
+  public increment() {
+    this.count++;
+  }
+
+  public decrement() {
+    assert(this.count > 0n);
+    this.count--;
   }
 }
 ```
+
+The compiler automatically injects `checkPreimage` at the entry of every public method and state continuation at the exit. You do not need to pass `SigHashPreimage` as a parameter or call `addOutput()` for simple state transitions -- the compiler handles this.
 
 ## The OP_PUSH_TX Mechanism
 
@@ -76,9 +77,9 @@ State fields are serialized in the order they appear in the contract class, usin
 
 | Type | Encoding |
 | ---- | -------- |
-| `bigint` | Minimal Script number encoding (variable length) + 1-byte length prefix |
-| `boolean` | `OP_TRUE` (0x01) or `OP_FALSE` (0x00) |
-| `ByteString` | Raw bytes + varint length prefix |
+| `bigint` | Fixed 8-byte little-endian sign-magnitude encoding |
+| `boolean` | Raw byte 0x01 (true) or 0x00 (false) |
+| `ByteString` | Bitcoin Script push-data encoding (direct push for ≤75 bytes, OP_PUSHDATA1/2/4 for larger) |
 | `Ripemd160` | 20 bytes (fixed length, no prefix) |
 | `Sha256` | 32 bytes (fixed length, no prefix) |
 | `PubKey` | 33 bytes (compressed, fixed length, no prefix) |
@@ -89,14 +90,14 @@ The SDK's `serializeState()` and `deserializeState()` functions handle this enco
 import { serializeState, deserializeState } from 'runar-sdk';
 
 const stateBytes = serializeState(
-  { count: 5n },
   [{ name: 'count', type: 'bigint' }],
+  { count: 5n },
 );
-// stateBytes: "0105" (1-byte length prefix + value 5)
+// stateBytes: "0500000000000000" (fixed 8-byte little-endian encoding)
 
 const state = deserializeState(
-  stateBytes,
   [{ name: 'count', type: 'bigint' }],
+  stateBytes,
 );
 // state: { count: 5n }
 ```
@@ -145,25 +146,30 @@ Here is a complete end-to-end example of deploying a Counter contract and callin
 ### The Contract
 
 ```typescript
-import { StatefulSmartContract, assert, SigHashPreimage } from 'runar-lang';
+import { StatefulSmartContract, assert } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
   count: bigint;
 
-  constructor() {
-    super();
-    this.count = 0n;
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
   }
 
-  public increment(preimage: SigHashPreimage) {
-    this.count = this.count + 1n;
-    this.addOutput(this.ctx.utxo.satoshis, this.count);
-    assert(this.checkPreimage(preimage));
+  public increment() {
+    this.count++;
+  }
+
+  public decrement() {
+    assert(this.count > 0n);
+    this.count--;
   }
 }
 
 export { Counter };
 ```
+
+The compiler auto-injects preimage verification and state continuation for every public method.
 
 ### Compile
 
@@ -180,11 +186,9 @@ import counterArtifact from './artifacts/Counter.json';
 const provider = new WhatsOnChainProvider('testnet');
 const signer = new LocalSigner('cN3L4FfPtE7WjknM...');
 
-const counter = new RunarContract(counterArtifact);
-counter.setState({ count: 0n });
-counter.connect(provider, signer);
+const counter = new RunarContract(counterArtifact, [0n]);
 
-const deployResult = await counter.deploy({ satoshis: 10000 });
+const deployResult = await counter.deploy(provider, signer, { satoshis: 10000 });
 console.log('Deployed:', deployResult.txid);
 console.log('State:', counter.state); // { count: 0n }
 ```
@@ -193,16 +197,15 @@ console.log('State:', counter.state); // { count: 0n }
 
 ```typescript
 // First increment: count 0 -> 1
-await counter.call('increment', { preimage: 'auto' }, { outputs: 'auto' });
+await counter.call('increment', [], provider, signer);
 console.log('After 1st call:', counter.state); // { count: 1n }
-console.log('UTXO:', counter.txid, counter.outputIndex);
 
 // Second increment: count 1 -> 2
-await counter.call('increment', { preimage: 'auto' }, { outputs: 'auto' });
+await counter.call('increment', [], provider, signer);
 console.log('After 2nd call:', counter.state); // { count: 2n }
 
 // Third increment: count 2 -> 3
-await counter.call('increment', { preimage: 'auto' }, { outputs: 'auto' });
+await counter.call('increment', [], provider, signer);
 console.log('After 3rd call:', counter.state); // { count: 3n }
 ```
 
@@ -224,10 +227,10 @@ If you need to read the current state of a stateful contract without modifying i
 ```typescript
 import { extractStateFromScript } from 'runar-sdk';
 
-const output = await provider.getOutput(txid, 0);
+const tx = await provider.getTransaction(txid);
 const state = extractStateFromScript(
-  output.script,
-  counterArtifact.stateFields,
+  counterArtifact,
+  tx.outputs[0].script,
 );
 
 console.log(state); // { count: 3n }
@@ -260,11 +263,8 @@ await counter.deploy({ satoshis: 30000 });
 If the continuation output's satoshi amount gets too low to pay the next fee, you can add a funding input to the call transaction:
 
 ```typescript
-const result = await counter.call('increment', {
-  preimage: 'auto',
-}, {
-  outputs: 'auto',
-  fundingUtxos: [additionalUtxo], // extra input to cover fees
+const result = await counter.call('increment', [], provider, signer, {
+  additionalUtxos: [additionalUtxo], // extra input to cover fees
 });
 ```
 
@@ -278,6 +278,6 @@ Because UTXOs can only be spent once, two parties cannot call the same stateful 
 
 ## What's Next
 
-- [Token Contracts](/docs/en/sdk/token-contracts) -- Tokens are built on the inductive contract pattern
+- [Token Contracts](/docs/en/sdk/token-contracts) -- Tokens are built on the stateful contract pattern
 - [Calling a Contract](/docs/en/sdk/calling) -- General contract calling guide
 - [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- Managing fees in state transition chains

@@ -15,14 +15,17 @@ The main class for interacting with deployed contracts.
 ### Constructor
 
 ```typescript
-new RunarContract(artifact: ContractArtifact, provider: Provider, signer: Signer)
+new RunarContract(artifact: RunarArtifact, constructorArgs: unknown[])
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `artifact` | `ContractArtifact` | The compiled JSON artifact from `runar compile` |
-| `provider` | `Provider` | Network provider for fetching UTXOs and broadcasting |
-| `signer` | `Signer` | Signs transactions on behalf of the caller |
+| `artifact` | `RunarArtifact` | The compiled JSON artifact from `runar compile` |
+| `constructorArgs` | `unknown[]` | Constructor arguments as an array, matching the order in the artifact's `abi.constructor.params` |
+
+```typescript
+const contract = new RunarContract(artifact, [pubKeyHash]);
+```
 
 ### Static Methods
 
@@ -32,19 +35,21 @@ Reconstruct a contract instance from an existing on-chain deployment.
 
 ```typescript
 static async fromTxId(
+  artifact: RunarArtifact,
   txId: string,
-  provider: Provider,
-  artifact: ContractArtifact
+  outputIndex: number,
+  provider: Provider
 ): Promise<RunarContract>
 ```
 
-Fetches the transaction from the network, extracts the locking script, and recreates the contract instance with its current state.
+Fetches the transaction from the network, extracts the locking script from the specified output, and recreates the contract instance with its current state.
 
 ```typescript
 const contract = await RunarContract.fromTxId(
+  artifact,
   'a1b2c3d4e5f6...',
-  provider,
-  artifact
+  0,
+  provider
 );
 console.log('Current state:', contract.state);
 ```
@@ -53,80 +58,93 @@ console.log('Current state:', contract.state);
 
 #### deploy()
 
-Deploy the contract to the network.
+Deploy the contract to the network. Has two overloads: pass provider/signer explicitly, or use a previously connected provider/signer via `connect()`.
 
 ```typescript
-async deploy(
-  constructorArgs: Record<string, any>,
-  satoshis: number
-): Promise<DeployResult>
+// Overload 1: explicit provider and signer
+async deploy(provider: Provider, signer: Signer, options?: DeployOptions): Promise<DeployResult>
+
+// Overload 2: use connected provider/signer
+async deploy(options: DeployOptions): Promise<DeployResult>
 ```
 
 ```typescript
+interface DeployOptions {
+  satoshis?: number;
+  changeAddress?: string;
+}
+
 interface DeployResult {
-  txId: string;
-  outputIndex: number;
-  script: string;
-  satoshis: number;
+  txid: string;
+  tx: TransactionData;
 }
 ```
 
 ```typescript
-const result = await contract.deploy(
-  { pubKeyHash: '89abcdef...' },
-  10000
-);
-console.log('Deployed at:', result.txId);
+// With explicit provider/signer:
+const result = await contract.deploy(provider, signer, { satoshis: 10000 });
+
+// Or with connect():
+contract.connect(provider, signer);
+const result = await contract.deploy({ satoshis: 10000 });
 ```
 
 #### call()
 
-Invoke a public method on the deployed contract.
+Invoke a public method on the deployed contract. Has two overloads matching `deploy()`.
 
 ```typescript
+// Overload 1: explicit provider and signer
 async call(
   methodName: string,
-  args: Record<string, any>,
-  options?: CallOptions
+  args: unknown[],
+  provider: Provider,
+  signer: Signer,
+  options?: CallOptions,
+): Promise<CallResult>
+
+// Overload 2: use connected provider/signer
+async call(
+  methodName: string,
+  args: unknown[],
+  options?: CallOptions,
 ): Promise<CallResult>
 ```
 
 ```typescript
 interface CallOptions {
-  // Additional satoshis to send with the call transaction
   satoshis?: number;
-  // Specific UTXO to spend (default: auto-select)
-  utxo?: UTXO;
-  // Fee rate in satoshis per byte (default: 1)
-  feeRate?: number;
+  changeAddress?: string;
+  newState?: Record<string, unknown>;
 }
 
 interface CallResult {
-  txId: string;
-  success: boolean;
-  error?: string;
+  txid: string;
+  tx: TransactionData;
 }
 ```
 
 ```typescript
-const result = await contract.call('unlock', {
-  sig: await signer.sign(tx),
-  pubKey: signer.publicKey,
-});
+const result = await contract.call(
+  'unlock',
+  [null, signer.publicKey],  // null = auto-sign with signer
+  provider,
+  signer,
+);
 ```
 
 #### connect()
 
-Attach a different provider and/or signer to the contract.
+Store a provider and signer on the contract so they do not need to be passed to every `deploy()` and `call()` invocation.
 
 ```typescript
-connect(provider?: Provider, signer?: Signer): RunarContract
+connect(provider: Provider, signer: Signer): void
 ```
 
-Returns a new `RunarContract` instance bound to the given provider and signer. The original instance is not modified.
+Mutates the contract instance in-place, storing the given provider and signer. Both `provider` and `signer` are required.
 
 ```typescript
-const mainnetContract = contract.connect(mainnetProvider, mainnetSigner);
+contract.connect(mainnetProvider, mainnetSigner);
 ```
 
 #### setState()
@@ -159,10 +177,10 @@ console.log('Owner:', contract.state.owner);
 Get the compiled locking script with constructor arguments substituted.
 
 ```typescript
-getLockingScript(constructorArgs: Record<string, any>): string
+getLockingScript(): string
 ```
 
-Returns a hex-encoded Bitcoin Script string.
+Returns a hex-encoded Bitcoin Script string. Constructor arguments are already substituted from the values passed to the `RunarContract` constructor.
 
 #### buildUnlockingScript()
 
@@ -171,7 +189,7 @@ Build the unlocking script for a given method call.
 ```typescript
 buildUnlockingScript(
   methodName: string,
-  args: Record<string, any>
+  args: unknown[]
 ): string
 ```
 
@@ -186,12 +204,12 @@ Providers handle network communication -- fetching UTXOs, broadcasting transacti
 Connects to the WhatsOnChain API.
 
 ```typescript
-new WhatsOnChainProvider(network: 'mainnet' | 'testnet', apiKey?: string)
+new WhatsOnChainProvider(network: 'mainnet' | 'testnet')
 ```
 
 ```typescript
 const provider = new WhatsOnChainProvider('testnet');
-const provider = new WhatsOnChainProvider('mainnet', 'your-api-key');
+const provider = new WhatsOnChainProvider('mainnet');
 ```
 
 **Methods:**
@@ -200,7 +218,7 @@ const provider = new WhatsOnChainProvider('mainnet', 'your-api-key');
 |--------|-----------|-------------|
 | `getUtxos` | `(address: string) => Promise<UTXO[]>` | Fetch UTXOs for an address |
 | `broadcast` | `(rawTx: string) => Promise<string>` | Broadcast a raw transaction, returns TxID |
-| `getTx` | `(txId: string) => Promise<Transaction>` | Fetch a transaction by ID |
+| `getTransaction` | `(txid: string) => Promise<Transaction>` | Fetch a transaction by ID |
 | `getBlockHeight` | `() => Promise<number>` | Get the current block height |
 
 ### MockProvider
@@ -235,14 +253,15 @@ mock.addUtxo({
 Connects to a BSV node via JSON-RPC.
 
 ```typescript
-new RPCProvider(url: string, credentials?: { user: string; pass: string })
+new RPCProvider(url: string, user: string, pass: string, options?: RPCProviderOptions)
 ```
 
 ```typescript
-const provider = new RPCProvider('http://localhost:8332', {
-  user: 'rpcuser',
-  pass: 'rpcpassword',
-});
+const provider = new RPCProvider(
+  'http://localhost:8332',
+  'rpcuser',
+  'rpcpassword',
+);
 ```
 
 Supports all the same methods as `WhatsOnChainProvider` plus additional RPC-specific methods like `getRawMempool()` and `getBlock()`.
@@ -279,39 +298,42 @@ console.log('Public key:', signer.publicKey);
 Delegates signing to an external service or hardware device.
 
 ```typescript
-new ExternalSigner(signCallback: SignCallback)
+new ExternalSigner(pubKeyHex: string, addressStr: string, signFn: SignCallback)
 ```
 
 ```typescript
-interface SignCallback {
-  sign(txHex: string, inputIndex: number): Promise<string>;
-  getPublicKey(): Promise<string>;
-}
+type SignCallback = (txHex: string, inputIndex: number) => Promise<string>;
 
-const signer = new ExternalSigner({
-  sign: async (txHex, inputIndex) => {
+const signer = new ExternalSigner(
+  '02aabb...',      // public key hex
+  'mAddress...',    // BSV address
+  async (txHex, inputIndex) => {
     // Send to hardware wallet, external API, etc.
     return await hardwareWallet.sign(txHex, inputIndex);
   },
-  getPublicKey: async () => {
-    return await hardwareWallet.getPublicKey();
-  },
-});
+);
 ```
 
 ### WalletSigner
 
-Integrates with browser wallet extensions (e.g., Yours Wallet, HandCash Connect).
+Integrates with BRC-100 compatible wallets using the `WalletClient` interface from `@bsv/sdk`.
 
 ```typescript
-new WalletSigner(walletAdapter: WalletAdapter)
+new WalletSigner(options: WalletSignerOptions)
 ```
 
 ```typescript
-const signer = new WalletSigner(window.yoursWallet);
-```
+interface WalletSignerOptions {
+  protocolID: [SecurityLevel, string];
+  keyID: string;
+  wallet?: WalletClient;  // defaults to the standard BRC-100 wallet
+}
 
-The `WalletAdapter` interface matches the standard BSV wallet API. Any wallet extension that implements `sign()` and `getPublicKey()` is compatible.
+const signer = new WalletSigner({
+  protocolID: [0, 'runar'],
+  keyID: '1',
+});
+```
 
 ## TokenWallet
 
@@ -410,18 +432,19 @@ function computeOpPushTx(
 
 // Build a deployment transaction
 function buildDeployTransaction(
-  artifact: ContractArtifact,
-  constructorArgs: Record<string, any>,
+  lockingScript: string,
   utxos: UTXO[],
   satoshis: number,
-  changeAddress: string
+  changeAddress: string,
+  changeScript: string,
+  feeRate?: number
 ): Transaction;
 
 // Build a method call transaction
 function buildCallTransaction(
   contract: RunarContract,
   methodName: string,
-  args: Record<string, any>,
+  args: unknown[],
   utxos: UTXO[],
   changeAddress: string
 ): Transaction;
@@ -435,12 +458,12 @@ function selectUtxos(
   utxos: UTXO[],
   targetAmount: number,
   feeRate?: number
-): { selected: UTXO[]; fee: number; change: number };
+): UTXO[];
 
 // Estimate the fee for deploying a contract
 function estimateDeployFee(
-  artifact: ContractArtifact,
-  constructorArgs: Record<string, any>,
+  numInputs: number,
+  lockingScriptByteLen: number,
   feeRate?: number
 ): number;
 ```

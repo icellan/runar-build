@@ -38,7 +38,7 @@ Unlike most programming languages, Runar evaluates **both sides** of `&&` and `|
 
 ```typescript
 // Both sides ALWAYS execute, even if the left side determines the result
-assert(checkSig(sig, pubKey) && verifyRabinSig(msg, rabinSig, oracleKey));
+assert(checkSig(sig, pubKey) && verifyRabinSig(msg, rabinSig, padding, oracleKey));
 ```
 
 This is a deliberate design decision that matches Bitcoin Script semantics. In Bitcoin Script, there is no conditional skipping of operations -- every opcode executes sequentially. The Runar compiler makes this explicit to prevent developers from assuming short-circuit behavior.
@@ -47,7 +47,7 @@ This is a deliberate design decision that matches Bitcoin Script semantics. In B
 
 ```typescript
 const sigValid = checkSig(sig, pubKey);
-const oracleValid = verifyRabinSig(msg, rabinSig, oracleKey);
+const oracleValid = verifyRabinSig(msg, rabinSig, padding, oracleKey);
 assert(sigValid && oracleValid);
 ```
 
@@ -252,7 +252,7 @@ Before deploying a contract to mainnet, verify:
 | No unprotected public methods | Manual review |
 | Fee estimation accounts for worst-case script size | `estimateDeployFee()` |
 | Compiled artifact matches source via `runar verify` | `runar verify` |
-| Cross-compiler conformance passes (if multi-language) | `runar test --conformance` |
+| Cross-compiler conformance passes (if multi-language) | Run conformance test suite |
 | Differential fuzzing shows no discrepancies | `differentialFuzz()` |
 
 ## Operational Security for Deployment Keys

@@ -196,54 +196,52 @@ This is a critical integration detail. When building oracle-based contracts, doc
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestContract } from 'runar-testing';
-import { bsv } from 'runar-sdk';
+import { TestContract, ALICE, BOB } from 'runar-testing';
+import { readFileSync } from 'fs';
 
 describe('PriceBet', () => {
-  const aliceKey = bsv.PrivateKey.fromRandom('testnet');
-  const bobKey = bsv.PrivateKey.fromRandom('testnet');
-  const alicePub = aliceKey.toPublicKey().toString();
-  const bobPub = bobKey.toPublicKey().toString();
+  const source = readFileSync('./src/contracts/PriceBet.runar.ts', 'utf-8');
 
   const oraclePubKey = 123456789n;
   const strikePrice = 50000n; // e.g., $500.00 in cents
 
-  async function createBet() {
-    const contract = await TestContract.fromSource(
-      'contracts/PriceBet.runar.ts',
-      'PriceBet'
-    );
-    return contract.create(alicePub, bobPub, oraclePubKey, strikePrice);
+  function createBet() {
+    return TestContract.fromSource(source, {
+      alicePubKey: ALICE.pubKey,
+      bobPubKey: BOB.pubKey,
+      oraclePubKey,
+      strikePrice,
+    });
   }
 
-  it('should allow mutual cancellation', async () => {
-    const instance = await createBet();
+  it('should allow mutual cancellation', () => {
+    const contract = createBet();
 
-    const result = await instance.call('cancel', {
-      aliceSig: instance.sign(aliceKey),
-      bobSig: instance.sign(bobKey),
+    const result = contract.call('cancel', {
+      aliceSig: ALICE.privKey,
+      bobSig: BOB.privKey,
     });
 
     expect(result.success).toBe(true);
   });
 
-  it('should reject cancel with only Alice signature', async () => {
-    const instance = await createBet();
+  it('should reject cancel with only Alice signature', () => {
+    const contract = createBet();
 
-    const result = await instance.call('cancel', {
-      aliceSig: instance.sign(aliceKey),
-      bobSig: instance.sign(aliceKey),
+    const result = contract.call('cancel', {
+      aliceSig: ALICE.privKey,
+      bobSig: ALICE.privKey,
     });
 
     expect(result.success).toBe(false);
   });
 
-  it('should reject cancel with only Bob signature', async () => {
-    const instance = await createBet();
+  it('should reject cancel with only Bob signature', () => {
+    const contract = createBet();
 
-    const result = await instance.call('cancel', {
-      aliceSig: instance.sign(bobKey),
-      bobSig: instance.sign(bobKey),
+    const result = contract.call('cancel', {
+      aliceSig: BOB.privKey,
+      bobSig: BOB.privKey,
     });
 
     expect(result.success).toBe(false);

@@ -68,42 +68,39 @@ The simplest covenant pattern constrains the spending transaction to produce a s
 
 ```typescript
 import {
-  SmartContract, assert, SigHashPreimage, Sig, PubKey, Addr,
+  SmartContract, assert, SigHashPreimage, Sig, PubKey, Addr, ByteString,
   checkPreimage, checkSig, extractOutputHash,
-  hash256, buildOutput, buildP2PKHScript,
+  hash256, num2bin, cat,
 } from 'runar-lang';
 
 class CovenantVault extends SmartContract {
-  readonly ownerPubKey: PubKey;
-  readonly recipientAddr: Addr;
+  readonly owner: PubKey;
+  readonly recipient: Addr;
   readonly minAmount: bigint;
 
-  constructor(ownerPubKey: PubKey, recipientAddr: Addr, minAmount: bigint) {
-    super(ownerPubKey, recipientAddr, minAmount);
-    this.ownerPubKey = ownerPubKey;
-    this.recipientAddr = recipientAddr;
+  constructor(owner: PubKey, recipient: Addr, minAmount: bigint) {
+    super(owner, recipient, minAmount);
+    this.owner = owner;
+    this.recipient = recipient;
     this.minAmount = minAmount;
   }
 
-  public withdraw(sig: Sig, preimage: SigHashPreimage) {
-    // Verify the transaction preimage is authentic
-    assert(checkPreimage(preimage));
+  public spend(sig: Sig, txPreimage: SigHashPreimage) {
+    assert(checkSig(sig, this.owner));
+    assert(checkPreimage(txPreimage));
 
-    // Verify the owner authorized this spend
-    assert(checkSig(sig, this.ownerPubKey));
+    // Construct the expected P2PKH output on-chain:
+    // <8-byte LE amount> <varint(25)> <OP_DUP OP_HASH160 OP_PUSH(20) recipient OP_EQUALVERIFY OP_CHECKSIG>
+    const p2pkhScript: ByteString = cat(cat('1976a914' as ByteString, this.recipient), '88ac' as ByteString);
+    const expectedOutput: ByteString = cat(num2bin(this.minAmount, 8n), p2pkhScript);
 
-    // Build the expected output: P2PKH to the designated recipient
-    const expectedScript = buildP2PKHScript(this.recipientAddr);
-    const expectedOutput = buildOutput(expectedScript, this.minAmount);
-
-    // Verify the spending transaction creates this exact output
-    const actualOutputHash = extractOutputHash(preimage);
-    assert(hash256(expectedOutput) === actualOutputHash);
+    // Verify the transaction's outputs match exactly
+    assert(hash256(expectedOutput) === extractOutputHash(txPreimage));
   }
 }
 ```
 
-This contract locks funds and ensures that when the owner withdraws, the funds go to the pre-designated `recipientAddr` with at least `minAmount` satoshis. Even if the owner's private key is compromised, the attacker cannot redirect funds to a different address.
+This contract locks funds and ensures that when the owner spends, the funds go to the pre-designated `recipient` with exactly `minAmount` satoshis. The P2PKH output script is constructed on-chain using `cat()` and hex-literal script fragments, then hashed and compared against the transaction's `hashOutputs` field from the sighash preimage.
 
 ## Multi-Output Covenants
 
@@ -121,13 +118,15 @@ class SplitPayment extends SmartContract {
     const amountA = totalAmount * this.splitRatio / 100n;
     const amountB = totalAmount - amountA;
 
-    const outputA = buildOutput(buildP2PKHScript(this.partyA), amountA);
-    const outputB = buildOutput(buildP2PKHScript(this.partyB), amountB);
+    // Build P2PKH outputs manually using hex script fragments
+    const scriptA = cat(cat('1976a914' as ByteString, this.partyA), '88ac' as ByteString);
+    const outputA = cat(num2bin(amountA, 8n), scriptA);
+    const scriptB = cat(cat('1976a914' as ByteString, this.partyB), '88ac' as ByteString);
+    const outputB = cat(num2bin(amountB, 8n), scriptB);
 
     // Concatenate both outputs and verify against the transaction
-    const expectedOutputs = outputA + outputB;
-    const actualOutputHash = extractOutputHash(preimage);
-    assert(hash256(expectedOutputs) === actualOutputHash);
+    const expectedOutputs = cat(outputA, outputB);
+    assert(hash256(expectedOutputs) === extractOutputHash(preimage));
   }
 }
 ```
@@ -153,8 +152,8 @@ class TimelockVault extends SmartContract {
     assert(locktime >= this.unlockHeight);
 
     // Output constraint: must send to designated recipient
-    const expectedScript = buildP2PKHScript(this.recipientAddr);
-    const expectedOutput = buildOutput(expectedScript, extractAmount(preimage));
+    const p2pkhScript = cat(cat('1976a914' as ByteString, this.recipientAddr), '88ac' as ByteString);
+    const expectedOutput = cat(num2bin(extractAmount(preimage), 8n), p2pkhScript);
     assert(hash256(expectedOutput) === extractOutputHash(preimage));
   }
 }
@@ -184,7 +183,7 @@ Covenants that verify the full transaction preimage add significant script size 
 
 **Precompute where possible.** If a covenant always enforces the same output script, embed the hash of the expected script as a constant rather than rebuilding it at execution time.
 
-**Watch stack depth.** Preimage parsing pushes many values onto the stack. Complex covenants can approach the 800-element stack limit. Use the script debugger's `stack` command to monitor depth during development.
+**Watch stack depth.** Preimage parsing pushes many values onto the stack. Complex covenants can approach the 800-element stack limit. The compiler enforces this at compile time, but you can also inspect stack usage by compiling with `--asm` and reviewing the opcode sequence.
 
 ### Script Size Guidelines
 
