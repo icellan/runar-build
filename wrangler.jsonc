@@ -1,0 +1,6 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/schemas/config/wrangler.json",
+  "name": "runar-build",
+  "compatibility_date": "2026-03-15",
+  "pages_build_output_dir": "./dist"
+}
