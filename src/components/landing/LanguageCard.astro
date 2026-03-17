@@ -1,7 +1,7 @@
 ---
 interface Props {
   name: string;
-  status: 'stable' | 'beta' | 'planned';
+  status: 'stable' | 'beta' | 'experimental';
   snippet: string;
 }
 
@@ -10,7 +10,7 @@ const { name, status, snippet } = Astro.props;
 const statusColors = {
   stable: 'bg-success/10 text-success',
   beta: 'bg-warning/10 text-warning',
-  planned: 'bg-neutral-500/10 text-text-tertiary',
+  experimental: 'bg-neutral-500/10 text-text-tertiary',
 };
 ---
 

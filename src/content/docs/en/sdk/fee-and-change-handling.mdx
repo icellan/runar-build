@@ -261,7 +261,7 @@ Several strategies reduce transaction size and fees:
 **Use the constant folder.** Enable constant folding during compilation to reduce script size:
 
 ```bash
-runar compile contracts/MyContract.runar.ts --enable-constant-folding
+runar compile src/contracts/MyContract.runar.ts --enable-constant-folding
 ```
 
 **Merge token UTXOs.** Many small token UTXOs cost more to spend than one large one. Use `TokenWallet.merge()` to consolidate periodically.

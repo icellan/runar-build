@@ -57,7 +57,7 @@ static fromSource(
 Throws if compilation fails, with a message containing all error diagnostics.
 
 ```typescript
-const src = readFileSync('./contracts/Arithmetic.runar.ts', 'utf8');
+const src = readFileSync('./src/contracts/Arithmetic.runar.ts', 'utf8');
 const contract = ScriptExecutionContract.fromSource(
   src,
   { target: 27n },

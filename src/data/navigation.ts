@@ -119,10 +119,10 @@ export const docsNavigation: NavSection[] = [
     items: [
       { title: 'Example Gallery', slug: 'gallery' },
       { title: 'Counter', slug: 'counter' },
-      { title: 'Tic-Tac-Toe', slug: 'token-swap' },
+      { title: 'Tic-Tac-Toe', slug: 'tic-tac-toe' },
       { title: 'Auction', slug: 'auction' },
-      { title: 'Blackjack Betting', slug: 'multi-sig-wallet' },
-      { title: 'Price Bet', slug: 'payment-channel' },
+      { title: 'Blackjack Betting', slug: 'blackjack-betting' },
+      { title: 'Price Bet', slug: 'price-bet' },
     ],
   },
 ];

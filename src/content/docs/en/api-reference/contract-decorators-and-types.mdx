@@ -49,7 +49,7 @@ class P2PKH extends SmartContract {
 }
 ```
 
-Every public method must call `assert()` at least once. Methods without the `public` keyword are private helpers that the compiler inlines at each call site.
+In a `SmartContract` (stateless), every public method should call `assert()` to define spending conditions. In a `StatefulSmartContract`, the compiler automatically injects covenant enforcement (preimage verification and state continuation), so explicit `assert()` calls are only needed for business logic validation. Methods without the `public` keyword are private helpers that the compiler inlines at each call site.
 
 ### Readonly Properties (Immutable)
 
@@ -463,6 +463,7 @@ const sigType = SigHash.SINGLE | SigHash.FORKID | SigHash.ANYONECANPAY; // 0xC3
 |----------|-------------|
 | `this.addOutput(satoshis, ...stateValues)` | Add a continuation output with updated state |
 | `this.addRawOutput(satoshis, scriptBytes)` | Add an arbitrary output with caller-specified script bytes |
+| `this.getStateScript()` | Returns the serialized script bytes for all outputs defined by prior `addOutput()` calls. Used with `hash256()` and `extractOutputHash()` for explicit covenant enforcement in multi-output contracts. |
 
 ## Further Reading
 

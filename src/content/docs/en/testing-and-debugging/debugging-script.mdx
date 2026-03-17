@@ -292,7 +292,7 @@ FAIL  tests/PriceBet.test.ts
 Use `--asm` to include human-readable assembly and `--ir` to include the ANF intermediate representation:
 
 ```bash
-runar compile contracts/PriceBet.runar.ts --asm --ir --output ./artifacts
+runar compile src/contracts/PriceBet.runar.ts --asm --ir --output ./artifacts
 ```
 
 The artifact then contains both the `asm` field (opcode names) and `ir` field (named temporaries like `t0_price`, `t1_msg`), letting you trace how high-level expressions map through the compilation pipeline to final opcodes.

@@ -6,6 +6,8 @@ order: 50
 lang: "en"
 ---
 
+> **Experimental:** The Solidity frontend compiles contracts correctly but cannot be tested natively with Solidity tooling. All tests must use the TypeScript test runner (`runar test` with vitest). The API could change in minor releases. For production contracts, consider TypeScript, Go, Rust, or Python.
+
 Runar can compile a subset of Solidity to Bitcoin Script, allowing developers with Ethereum experience to target BSV without learning a new language. The Solidity frontend maps familiar Solidity syntax to the UTXO model, but there are important differences from EVM execution that you need to understand.
 
 ## Prerequisites
@@ -385,7 +387,7 @@ The following standard Solidity features are not available in Runar contracts:
 ## Compiling Solidity Contracts
 
 ```bash
-runar compile contracts/P2PKH.runar.sol --output ./artifacts
+runar compile src/contracts/P2PKH.runar.sol --output ./artifacts
 ```
 
 The compiler's Solidity frontend parses the `.runar.sol` file, translates it to the shared IR, and produces the standard JSON artifact. No external Solidity compiler (solc) is involved.
@@ -393,7 +395,7 @@ The compiler's Solidity frontend parses the `.runar.sol` file, translates it to 
 To compile all Solidity contracts:
 
 ```bash
-runar compile contracts/*.runar.sol --output ./artifacts
+runar compile src/contracts/*.runar.sol --output ./artifacts
 ```
 
 ## Testing Solidity Contracts
@@ -405,7 +407,7 @@ import { expect, test } from 'vitest';
 import { TestContract } from 'runar-testing';
 import { readFileSync } from 'node:fs';
 
-const source = readFileSync('./contracts/Counter.runar.sol', 'utf8');
+const source = readFileSync('./src/contracts/Counter.runar.sol', 'utf8');
 
 test('Counter increment', () => {
   const counter = TestContract.fromSource(source, { count: 0n }, 'Counter.runar.sol');

@@ -146,7 +146,7 @@ This is a design decision, not a technical limitation.
 ## Compiling
 
 ```bash
-runar compile contracts/Escrow.runar.ts --output ./artifacts --asm
+runar compile src/contracts/Escrow.runar.ts --output ./artifacts --asm
 ```
 
 The compiled script will contain the three public keys and the `OP_CHECKSIG` operations. Because this is a stateless contract with only signature checks, the script is compact and efficient.
@@ -296,25 +296,41 @@ The `--satoshis` amount is the escrowed payment. After deployment, the buyer sha
 
 ### Releasing Funds
 
-When both parties are satisfied, the seller constructs a release transaction and the buyer co-signs:
+When both parties are satisfied, use the SDK to construct and broadcast a release transaction:
 
-```bash
-runar call <txid>:0 release \
-  --artifact ./artifacts/Escrow.json \
-  --network testnet \
-  --signers seller:<seller-WIF>,buyer:<buyer-WIF>
+```typescript
+import { RunarContract, LocalSigner, WhatsOnChainProvider } from 'runar-sdk';
+import artifact from './artifacts/Escrow.json';
+
+const provider = new WhatsOnChainProvider('testnet');
+const sellerSigner = new LocalSigner('<seller-WIF>');
+const buyerSigner = new LocalSigner('<buyer-WIF>');
+
+const contract = await RunarContract.fromTxId(artifact, '<txid>', 0, provider);
+contract.connect(provider, sellerSigner);
+
+const result = await contract.call('release', [null, null], {
+  // Both signatures are auto-generated from their respective signers
+});
 ```
 
 ### Initiating a Refund
 
 If there is a dispute and the arbiter rules in the buyer's favor:
 
-```bash
-runar call <txid>:0 refund \
-  --artifact ./artifacts/Escrow.json \
-  --network testnet \
-  --signers buyer:<buyer-WIF>,arbiter:<arbiter-WIF>
+```typescript
+const buyerSigner = new LocalSigner('<buyer-WIF>');
+const arbiterSigner = new LocalSigner('<arbiter-WIF>');
+
+const contract = await RunarContract.fromTxId(artifact, '<txid>', 0, provider);
+contract.connect(provider, buyerSigner);
+
+const result = await contract.call('refund', [null, null], {
+  // Both signatures are auto-generated from their respective signers
+});
 ```
+
+See [Calling a Contract](/docs/sdk/calling) and [Multi-Signer Transactions](/docs/sdk/multi-signer) for the full multi-signer workflow.
 
 ## Design Variations
 
@@ -354,5 +370,5 @@ The 2-of-3 pattern used here is the most common escrow design, but you can creat
 
 - [Example Gallery](/docs/examples/gallery) -- Browse annotated contract examples including auctions, games, and oracle-based contracts
 - [Counter Example](/docs/examples/counter) -- The simplest stateful contract
-- [Tic-Tac-Toe Example](/docs/examples/token-swap) -- A two-player on-chain game with state management
+- [Tic-Tac-Toe Example](/docs/examples/tic-tac-toe) -- A two-player on-chain game with state management
 - [Contract Basics](/docs/writing-contracts/contract-basics) -- Deep dive into the type system and compiler constraints

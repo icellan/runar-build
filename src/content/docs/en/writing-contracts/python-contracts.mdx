@@ -11,7 +11,7 @@ Python is a fully supported language for writing Runar smart contracts. Use fami
 ## Prerequisites
 
 - **Python 3.10+** installed on your system
-- The `runar-py` package (installed automatically when using the Runar CLI with Python contracts)
+- The `runar` Python package (installed automatically when using the Runar CLI with Python contracts)
 
 ## File Extension and Module Structure
 
@@ -381,7 +381,7 @@ The following Python features are not available in contracts:
 ## Compiling Python Contracts
 
 ```bash
-runar compile contracts/counter.runar.py --output ./artifacts
+runar compile src/contracts/counter.runar.py --output ./artifacts
 ```
 
 The compiler invokes the `runar-py` frontend to parse the Python source, translates it to the shared IR, and produces the standard JSON artifact.
@@ -389,7 +389,7 @@ The compiler invokes the `runar-py` frontend to parse the Python source, transla
 To compile all Python contracts:
 
 ```bash
-runar compile contracts/*.runar.py --output ./artifacts
+runar compile src/contracts/*.runar.py --output ./artifacts
 ```
 
 ## Testing Python Contracts

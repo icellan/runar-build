@@ -413,7 +413,7 @@ Since private methods are inlined, calling the same private method from multiple
 Use the Runar CLI to compile:
 
 ```bash
-runar compile contracts/P2PKH.runar.ts --output ./artifacts
+runar compile src/contracts/P2PKH.runar.ts --output ./artifacts
 ```
 
 This produces a JSON artifact containing the compiled Bitcoin Script, the contract ABI (method signatures and parameter types), and metadata. See [Output Artifacts](/docs/compiler/output-artifacts) for details on the artifact format.
@@ -421,7 +421,7 @@ This produces a JSON artifact containing the compiled Bitcoin Script, the contra
 To compile with additional output:
 
 ```bash
-runar compile contracts/P2PKH.runar.ts --output ./artifacts --ir --asm
+runar compile src/contracts/P2PKH.runar.ts --output ./artifacts --ir --asm
 ```
 
 The `--ir` flag includes the intermediate representation and `--asm` includes the human-readable script assembly in the artifact.
@@ -435,7 +435,7 @@ import { expect, test } from 'vitest';
 import { TestContract } from 'runar-testing';
 import { readFileSync } from 'node:fs';
 
-const source = readFileSync('./contracts/P2PKH.runar.ts', 'utf8');
+const source = readFileSync('./src/contracts/P2PKH.runar.ts', 'utf8');
 
 test('P2PKH unlock succeeds with correct key', () => {
   const contract = TestContract.fromSource(source, {

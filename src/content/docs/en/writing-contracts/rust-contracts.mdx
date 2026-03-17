@@ -444,7 +444,7 @@ The following Rust features are not available in contracts:
 ## Compiling Rust Contracts
 
 ```bash
-runar compile contracts/p2pkh.runar.rs --output ./artifacts
+runar compile src/contracts/p2pkh.runar.rs --output ./artifacts
 ```
 
 The compiler invokes the `runar-rs` frontend to parse the Rust source via the procedural macros, translates it to the shared IR, and produces the standard JSON artifact.
@@ -452,7 +452,7 @@ The compiler invokes the `runar-rs` frontend to parse the Rust source via the pr
 To compile all Rust contracts:
 
 ```bash
-runar compile contracts/*.runar.rs --output ./artifacts
+runar compile src/contracts/*.runar.rs --output ./artifacts
 ```
 
 ## Testing Rust Contracts

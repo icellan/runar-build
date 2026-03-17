@@ -30,7 +30,7 @@ An on-chain English auction where bidders compete by spending the current auctio
 
 ## Advanced Examples
 
-### [Tic-Tac-Toe](/docs/examples/token-swap)
+### [Tic-Tac-Toe](/docs/examples/tic-tac-toe)
 
 A complete two-player Tic-Tac-Toe game running entirely on-chain. Players take turns placing marks on a 3x3 board, with the contract enforcing turn order, move validity, win detection, and pot distribution. Demonstrates complex state management with nine board cells, turn tracking, and multiple exit conditions (win, tie, cancel).
 
@@ -40,7 +40,7 @@ A complete two-player Tic-Tac-Toe game running entirely on-chain. Players take t
 
 ---
 
-### [Blackjack Betting](/docs/examples/multi-sig-wallet)
+### [Blackjack Betting](/docs/examples/blackjack-betting)
 
 An oracle-attested blackjack betting contract where a player wagers against a house. The game outcome is verified using a Rabin oracle signature, with different settlement methods for blackjack (3:2 payout), regular wins, losses, and mutual cancellation. Demonstrates the Rabin oracle pattern for verifiable off-chain data.
 
@@ -50,7 +50,7 @@ An oracle-attested blackjack betting contract where a player wagers against a ho
 
 ---
 
-### [Price Bet](/docs/examples/payment-channel)
+### [Price Bet](/docs/examples/price-bet)
 
 A binary options-style price wager between two parties. An oracle attests to the current price of an asset, and the contract pays out to Alice if the price exceeds a strike price, or to Bob otherwise. Demonstrates oracle-driven conditional logic and cooperative cancellation.
 
@@ -67,14 +67,14 @@ All examples follow the standard Runar project structure. To run any example:
 runar init my-examples
 cd my-examples
 
-# Copy the contract source into contracts/
+# Copy the contract source into src/contracts/
 # Copy the test file into tests/
 
 # Install dependencies
 pnpm install
 
 # Compile the contract
-runar compile contracts/<ContractName>.runar.ts --output ./artifacts
+runar compile src/contracts/<ContractName>.runar.ts --output ./artifacts
 
 # Run tests
 runar test

@@ -6,6 +6,8 @@ order: 60
 lang: "en"
 ---
 
+> **Experimental:** The Move frontend compiles contracts correctly but cannot be tested natively with Move tooling. All tests must use the TypeScript test runner (`runar test` with vitest). The API could change in minor releases. For production contracts, consider TypeScript, Go, Rust, or Python.
+
 Move's resource-oriented programming model maps naturally to the UTXO paradigm. Runar compiles Move modules to Bitcoin Script, preserving Move's safety guarantees around resource ownership and linearity. The Move frontend is part of the `runar-lang` package and compiles through the same intermediate representation as all other Runar languages.
 
 ## Prerequisites
@@ -393,7 +395,7 @@ The following Move features are not available in Runar contracts:
 ## Compiling Move Contracts
 
 ```bash
-runar compile contracts/counter.runar.move --output ./artifacts
+runar compile src/contracts/counter.runar.move --output ./artifacts
 ```
 
 The compiler's Move frontend parses the `.runar.move` file, translates it to the shared IR, and produces the standard JSON artifact.
@@ -401,7 +403,7 @@ The compiler's Move frontend parses the `.runar.move` file, translates it to the
 To compile all Move contracts:
 
 ```bash
-runar compile contracts/*.runar.move --output ./artifacts
+runar compile src/contracts/*.runar.move --output ./artifacts
 ```
 
 ## Testing Move Contracts
@@ -413,7 +415,7 @@ import { expect, test } from 'vitest';
 import { TestContract } from 'runar-testing';
 import { readFileSync } from 'node:fs';
 
-const source = readFileSync('./contracts/Counter.runar.move', 'utf8');
+const source = readFileSync('./src/contracts/Counter.runar.move', 'utf8');
 
 test('Counter increment', () => {
   const counter = TestContract.fromSource(source, { count: 0n }, 'Counter.runar.move');

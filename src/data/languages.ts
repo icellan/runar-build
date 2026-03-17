@@ -1,6 +1,6 @@
 export interface Language {
   name: string;
-  status: 'stable' | 'beta' | 'planned';
+  status: 'stable' | 'beta' | 'experimental';
   snippet: string;
   lang: string;
 }
@@ -38,14 +38,14 @@ func (c *Counter) Increment() {
   },
   {
     name: 'Rust',
-    status: 'beta',
+    status: 'stable',
     lang: 'rust',
-    snippet: `#[runar::contract]
+    snippet: `#[runar::contract(stateful)]
 pub struct Counter {
-    pub count: Bigint,
+    pub count: i64,
 }
 
-#[runar::methods(Counter)]
+#[runar::methods]
 impl Counter {
     #[public]
     pub fn increment(&mut self) {
@@ -70,9 +70,9 @@ impl Counter {
   },
   {
     name: 'Solidity',
-    status: 'planned',
+    status: 'experimental',
     lang: 'solidity',
-    snippet: `contract Counter {
+    snippet: `contract Counter is StatefulSmartContract {
     int64 count;
 
     function increment() public {
@@ -82,7 +82,7 @@ impl Counter {
   },
   {
     name: 'Move',
-    status: 'planned',
+    status: 'experimental',
     lang: 'move',
     snippet: `module Counter {
     resource struct Counter {

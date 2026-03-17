@@ -225,7 +225,7 @@ public merge(sig: Sig, txPreimage: SigHashPreimage) {
 ## Compiling the Contract
 
 ```bash
-runar compile contracts/FungibleToken.runar.ts --output ./artifacts --asm
+runar compile src/contracts/FungibleToken.runar.ts --output ./artifacts --asm
 ```
 
 This produces `artifacts/FungibleTokenExample.json`. The artifact will be significantly larger than the P2PKH artifact because stateful contracts include the OP_PUSH_TX preimage verification logic in the script.
@@ -338,7 +338,7 @@ Every step is enforced on-chain. The covenant in the `transfer` method guarantee
 ## Deploying the Token
 
 ```bash
-runar compile contracts/FungibleToken.runar.ts --output ./artifacts
+runar compile src/contracts/FungibleToken.runar.ts --output ./artifacts
 
 runar deploy ./artifacts/FungibleTokenExample.json \
   --network testnet \

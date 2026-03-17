@@ -143,7 +143,7 @@ This is the difference between a stateful method (which constrains outputs) and 
 ## Compiling
 
 ```bash
-runar compile contracts/NFT.runar.ts --output ./artifacts --asm
+runar compile src/contracts/NFT.runar.ts --output ./artifacts --asm
 ```
 
 ## Testing the NFT
@@ -284,7 +284,7 @@ Because `metadata` is `readonly`, it is immutable for the token's lifetime. This
 ## Deploying the NFT
 
 ```bash
-runar compile contracts/NFT.runar.ts --output ./artifacts
+runar compile src/contracts/NFT.runar.ts --output ./artifacts
 
 runar deploy ./artifacts/NFTExample.json \
   --network testnet \

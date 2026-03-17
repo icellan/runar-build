@@ -81,13 +81,13 @@ runar compile <source...> [options]
 
 ```bash
 # Compile a single contract
-runar compile contracts/P2PKH.runar.ts
+runar compile src/contracts/P2PKH.runar.ts
 
 # Compile all contracts in a directory
-runar compile contracts/*.runar.ts --output ./artifacts
+runar compile src/contracts/*.runar.ts --output ./artifacts
 
 # Compile with IR and ASM output
-runar compile contracts/PriceBet.runar.ts --asm --ir
+runar compile src/contracts/PriceBet.runar.ts --asm --ir
 ```
 
 ### Output

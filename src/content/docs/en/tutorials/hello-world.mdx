@@ -37,7 +37,8 @@ This creates the standard Runar project layout:
 
 ```
 hello-world/
-  contracts/       # Your .runar.ts contract source files
+  src/
+    contracts/     # Your .runar.ts contract source files
   tests/           # Test files (*.test.ts)
   artifacts/       # Compiled JSON artifacts (generated)
   package.json
@@ -56,15 +57,15 @@ import {
   assert,
   PubKey,
   Sig,
-  Ripemd160,
+  Addr,
   hash160,
   checkSig,
 } from 'runar-lang';
 
 class P2PKH extends SmartContract {
-  readonly pubKeyHash: Ripemd160;
+  readonly pubKeyHash: Addr;
 
-  constructor(pubKeyHash: Ripemd160) {
+  constructor(pubKeyHash: Addr) {
     super(pubKeyHash);
     this.pubKeyHash = pubKeyHash;
   }
@@ -83,10 +84,10 @@ Let's break down every part of this contract:
 ### The Import Statement
 
 ```typescript
-import { SmartContract, assert, PubKey, Sig, Ripemd160, hash160, checkSig } from 'runar-lang';
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
 ```
 
-All Runar contracts import from `runar-lang`. This is the only allowed import in contract files. The import provides the base class (`SmartContract`), assertion function (`assert`), cryptographic types (`PubKey`, `Sig`, `Ripemd160`), and built-in functions (`hash160`, `checkSig`).
+All Runar contracts import from `runar-lang`. This is the only allowed import in contract files. The import provides the base class (`SmartContract`), assertion function (`assert`), cryptographic types (`PubKey`, `Sig`, `Addr`), and built-in functions (`hash160`, `checkSig`).
 
 ### The Class Declaration
 
@@ -99,15 +100,15 @@ The contract extends `SmartContract`, which means it is **stateless**. All prope
 ### The Property
 
 ```typescript
-readonly pubKeyHash: Ripemd160;
+readonly pubKeyHash: Addr;
 ```
 
-`Ripemd160` is a 20-byte type representing a RIPEMD-160 hash digest. The `readonly` keyword is required for `SmartContract` properties -- stateless contracts cannot have mutable state. This value is embedded directly in the compiled Bitcoin Script.
+`Addr` is a 20-byte type representing a BSV address (the RIPEMD-160 hash of a public key). The `readonly` keyword is required for `SmartContract` properties -- stateless contracts cannot have mutable state. This value is embedded directly in the compiled Bitcoin Script.
 
 ### The Constructor
 
 ```typescript
-constructor(pubKeyHash: Ripemd160) {
+constructor(pubKeyHash: Addr) {
   super(pubKeyHash);
   this.pubKeyHash = pubKeyHash;
 }
@@ -136,7 +137,7 @@ If both assertions pass, the UTXO is spent. If either fails, the transaction is 
 Compile the contract source into a deployable artifact:
 
 ```bash
-runar compile contracts/P2PKH.runar.ts --output ./artifacts --asm
+runar compile src/contracts/P2PKH.runar.ts --output ./artifacts --asm
 ```
 
 This produces `artifacts/P2PKH.json`. The `--asm` flag includes human-readable assembly in the output, which is useful for learning and debugging.
@@ -153,7 +154,7 @@ The compiled artifact is a JSON file containing everything needed to deploy and 
   "abi": {
     "constructor": {
       "params": [
-        { "name": "pubKeyHash", "type": "Ripemd160" }
+        { "name": "pubKeyHash", "type": "Addr" }
       ]
     },
     "methods": [
@@ -186,7 +187,7 @@ Create a test file at `tests/P2PKH.test.ts`:
 ```typescript
 import { describe, it, expect } from 'vitest';
 import { TestContract, ALICE, BOB } from 'runar-testing';
-import { readFileSync } from 'fs';
+import { readFileSync } from 'node:fs';
 
 describe('P2PKH', () => {
   const source = readFileSync('./src/contracts/P2PKH.runar.ts', 'utf-8');
@@ -308,7 +309,7 @@ Verification passed.
 | `SmartContract` | Stateless contracts with `readonly` properties embedded in the locking script |
 | `constructor` + `super()` | How deployment-time parameters are registered with the compiler |
 | Public methods | Spending conditions that callers must satisfy with valid arguments |
-| `assert()` | The assertion primitive -- every public method must contain at least one |
+| `assert()` | The assertion primitive -- used to define spending conditions in public methods |
 | `hash160` / `checkSig` | Built-in cryptographic functions that map to Bitcoin Script opcodes |
 | `TestContract` | Local contract testing without network dependencies |
 | `runar compile` | Source-to-artifact compilation with optional ASM output |

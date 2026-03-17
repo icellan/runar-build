@@ -370,7 +370,7 @@ The following Go features are not available in contracts:
 ## Compiling Go Contracts
 
 ```bash
-runar compile contracts/tictactoe/tictactoe.runar.go --output ./artifacts
+runar compile src/contracts/tictactoe/tictactoe.runar.go --output ./artifacts
 ```
 
 The compiler invokes the `runar-go` frontend to parse the Go source, translates it to the shared IR, and produces the same JSON artifact format as TypeScript contracts.
@@ -378,7 +378,7 @@ The compiler invokes the `runar-go` frontend to parse the Go source, translates 
 To compile all Go contracts in a directory:
 
 ```bash
-runar compile contracts/**/*.runar.go --output ./artifacts
+runar compile src/contracts/**/*.runar.go --output ./artifacts
 ```
 
 ## Testing Go Contracts

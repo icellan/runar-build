@@ -183,7 +183,7 @@ The `WalletSigner` uses the standard BRC-100 `WalletClient` interface from `@bsv
 The typical workflow from compilation to deployment:
 
 ```
-1. Compile       runar compile contracts/P2PKH.runar.ts --output ./artifacts
+1. Compile       runar compile src/contracts/P2PKH.runar.ts --output ./artifacts
                  Produces: artifacts/P2PKH.json
 
 2. Instantiate   const contract = new RunarContract(artifact, [pubKeyHash])

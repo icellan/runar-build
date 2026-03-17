@@ -24,14 +24,12 @@ class Counter extends StatefulSmartContract {
   }
 
   public increment() {
-    this.count = this.count + 1n;
-    assert(true);
+    this.count++;
   }
 
   public decrement() {
     assert(this.count > 0n);
-    this.count = this.count - 1n;
-    assert(true);
+    this.count--;
   }
 }
 
@@ -83,12 +81,11 @@ When the contract is deployed, the initial UTXO's locking script encodes `count 
 
 ```typescript
 public increment() {
-  this.count = this.count + 1n;
-  assert(true);
+  this.count++;
 }
 ```
 
-This public method adds 1 to the counter. The `assert(true)` at the end is required because every public method must contain at least one `assert()` call. In this case, the assertion always passes -- the method has no preconditions beyond the implicit covenant enforcement that the compiler injects.
+This public method adds 1 to the counter. The compiler automatically injects covenant enforcement for `StatefulSmartContract` methods, so no explicit `assert()` or preimage checking is needed here.
 
 When `increment` is called:
 
@@ -103,12 +100,11 @@ The caller cannot lie about the state update. The covenant ensures the new UTXO 
 ```typescript
 public decrement() {
   assert(this.count > 0n);
-  this.count = this.count - 1n;
-  assert(true);
+  this.count--;
 }
 ```
 
-Decrement has a precondition: `this.count > 0n`. You cannot decrement below zero. If someone tries to call `decrement` when the count is already 0, the assertion fails and the transaction is rejected by the network.
+Decrement has a precondition: `this.count > 0n`. You cannot decrement below zero. If someone tries to call `decrement` when the count is already 0, the assertion fails and the transaction is rejected by the network. The compiler automatically handles covenant enforcement, so no additional `assert()` call is needed beyond the business logic check.
 
 This demonstrates how assertions serve as both validation logic and access control. The contract enforces its own invariants on-chain -- no external validator is needed.
 
@@ -172,7 +168,7 @@ describe('Counter', () => {
 
 ```bash
 # Compile
-runar compile contracts/Counter.runar.ts --output ./artifacts --asm
+runar compile src/contracts/Counter.runar.ts --output ./artifacts --asm
 
 # Test
 runar test
@@ -182,15 +178,9 @@ runar deploy ./artifacts/Counter.json \
   --network testnet \
   --key <your-WIF-key> \
   --satoshis 10000
-
-# Increment the deployed counter
-runar call <txid>:0 increment \
-  --artifact ./artifacts/Counter.json \
-  --network testnet \
-  --key <your-WIF-key>
 ```
 
-Each call to `increment` or `decrement` creates a new transaction, spending the old UTXO and creating a new one. You can follow the chain of transactions on a block explorer to see the counter's value evolve over time.
+To call methods on the deployed contract, use the SDK. See [Calling a Contract](/docs/sdk/calling) for details.
 
 ## Key Takeaways
 

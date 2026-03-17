@@ -104,7 +104,7 @@ interface CompileResult {
 import { compile } from 'runar-compiler';
 import { readFileSync } from 'node:fs';
 
-const source = readFileSync('./contracts/P2PKH.runar.ts', 'utf8');
+const source = readFileSync('./src/contracts/P2PKH.runar.ts', 'utf8');
 
 const result = compile(source, {
   fileName: 'P2PKH.runar.ts',
@@ -356,23 +356,25 @@ interface SourceLocation {
 }
 ```
 
-### Error Codes
+### Common Diagnostic Messages
 
-| Code | Description |
-|------|-------------|
-| `E001` | Parse error: syntax error |
-| `E002` | Parse error: unexpected token |
-| `E010` | Validation: disallowed language feature |
-| `E011` | Validation: missing constructor |
-| `E012` | Validation: missing super() call |
-| `E020` | Type error: type mismatch |
-| `E021` | Type error: affine type used more than once |
-| `E022` | Type error: unknown type |
-| `E030` | Codegen: script too large |
-| `E031` | Codegen: estimated stack overflow |
-| `W001` | Warning: large script size |
-| `W002` | Warning: unused variable |
-| `W003` | Warning: shadowed variable |
+The compiler does not use structured error codes. Diagnostics are plain-text messages grouped by the phase that produced them:
+
+| Phase | Example Message | Severity |
+|-------|----------------|----------|
+| Parse | `Unexpected token 'foo'` | error |
+| Parse | `Expected ';' after expression` | error |
+| Validate | `Disallowed language feature: async/await` | error |
+| Validate | `Missing constructor` | error |
+| Validate | `Constructor must call super()` | error |
+| Type-check | `Type 'ByteString' is not assignable to type 'PubKey'` | error |
+| Type-check | `Affine type 'Sig' used more than once` | error |
+| Type-check | `Unknown type 'Foo'` | error |
+| Codegen | `Script exceeds maximum size` | error |
+| Codegen | `Estimated stack overflow` | error |
+| Any | `Large script size` | warning |
+| Any | `Unused variable 'x'` | warning |
+| Any | `Variable 'x' shadows outer declaration` | warning |
 
 ## Plugin and Extension Points
 

@@ -117,7 +117,7 @@ The `bid` method is recursive: it keeps the contract alive with updated state. T
 
 **Guard conditions.** Use preimage fields to enforce when transitions are valid. Check `extractLocktime(txPreimage)` for time-based guards, or use `extractSequence(txPreimage)` for relative timelocks.
 
-**Multi-party state.** Multiple parties can drive transitions by requiring different signatures for different methods. The TicTacToe contract in the [examples](/docs/examples/token-swap) demonstrates this pattern: Alice and Bob take turns, with the contract tracking whose turn it is as state.
+**Multi-party state.** Multiple parties can drive transitions by requiring different signatures for different methods. The TicTacToe contract in the [examples](/docs/examples/tic-tac-toe) demonstrates this pattern: Alice and Bob take turns, with the contract tracking whose turn it is as state.
 
 ## Introduction to ZK Proofs on BSV
 

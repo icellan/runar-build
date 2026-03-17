@@ -36,11 +36,11 @@ Rúnar supports six language frontends. Each compiles through the same intermedi
 | TypeScript | `.runar.ts`    | `runar-lang`     |
 | Go         | `.runar.go`    | `runar-go`       |
 | Rust       | `.runar.rs`    | `runar-rs`       |
-| Python     | `.runar.py`    | `runar-py`       |
+| Python     | `.runar.py`    | `runar`          |
 | Solidity   | `.runar.sol`   | *(built into compiler)* |
 | Move       | `.runar.move`  | *(built into compiler)* |
 
-TypeScript is the primary and most mature frontend. Go, Rust, and Python each have dedicated compiler implementations. The Solidity and Move frontends provide familiar syntax for developers coming from those ecosystems.
+TypeScript is the primary and most mature frontend. Go, Rust, and Python are stable and conformance-tested. The Solidity and Move frontends are experimental -- they compile contracts correctly but cannot be tested natively in their respective languages (tests must use the TypeScript test runner).
 
 ## Key Properties
 

@@ -117,13 +117,13 @@ The `<files...>` argument accepts one or more source files or glob patterns:
 
 ```bash
 # Single file
-runar compile contracts/P2PKH.runar.ts
+runar compile src/contracts/P2PKH.runar.ts
 
 # Multiple files
-runar compile contracts/P2PKH.runar.ts contracts/Counter.runar.ts
+runar compile src/contracts/P2PKH.runar.ts src/contracts/Counter.runar.ts
 
 # Glob pattern
-runar compile contracts/*.runar.ts
+runar compile src/contracts/*.runar.ts
 ```
 
 ### CLI Flags
@@ -139,10 +139,10 @@ runar compile contracts/*.runar.ts
 
 ```bash
 # Compile with full debug output
-runar compile contracts/P2PKH.runar.ts --output ./artifacts --ir --asm
+runar compile src/contracts/P2PKH.runar.ts --output ./artifacts --ir --asm
 
 # Compile with constant folding disabled
-runar compile contracts/Counter.runar.ts --disable-constant-folding --output ./build
+runar compile src/contracts/Counter.runar.ts --disable-constant-folding --output ./build
 ```
 
 ### Exit Codes

@@ -21,7 +21,7 @@ Not all language frontends are at the same level of maturity. Choose accordingly
 | Solidity | `.runar.sol` | `runar-lang` | **Experimental** | Familiar syntax for Ethereum developers. Subset of Solidity. |
 | Move | `.runar.move` | `runar-lang` | **Experimental** | Resource-oriented syntax. Subset of Move. |
 
-**Stable** means the frontend is conformance-tested, produces identical Bitcoin Script output to TypeScript for the same contract, and is suitable for production use. **Experimental** means the frontend is functional but may have edge cases, and the API could change in minor releases.
+**Stable** means the frontend is conformance-tested, produces identical Bitcoin Script output to TypeScript for the same contract, and is suitable for production use. **Experimental** means the frontend compiles contracts correctly but cannot be tested natively in its respective language -- tests must use the TypeScript test runner. The API could change in minor releases.
 
 ## Contract Declaration
 
@@ -212,11 +212,11 @@ For reference, here is the same simple P2PKH contract written in all six languag
 ### TypeScript
 
 ```typescript
-import { SmartContract, assert, PubKey, Sig, Ripemd160, hash160, checkSig } from 'runar-lang';
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
 
 class P2PKH extends SmartContract {
-  readonly pubKeyHash: Ripemd160;
-  constructor(pubKeyHash: Ripemd160) {
+  readonly pubKeyHash: Addr;
+  constructor(pubKeyHash: Addr) {
     super(pubKeyHash);
     this.pubKeyHash = pubKeyHash;
   }
@@ -234,7 +234,7 @@ package p2pkh
 import "runar"
 type P2PKH struct {
     runar.SmartContract
-    PubKeyHash runar.Ripemd160 `runar:"readonly"`
+    PubKeyHash runar.Addr `runar:"readonly"`
 }
 func (p *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
     runar.Assert(runar.Hash160(pubKey) == p.PubKeyHash)
@@ -248,7 +248,7 @@ func (p *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
 use runar::prelude::*;
 #[runar::contract]
 struct P2PKH {
-    #[readonly] pub_key_hash: Ripemd160,
+    #[readonly] pub_key_hash: Addr,
 }
 #[runar::methods]
 impl P2PKH {
@@ -263,10 +263,10 @@ impl P2PKH {
 ### Python
 
 ```python
-from runar import SmartContract, PubKey, Sig, Ripemd160, Readonly, public, assert_, hash160, check_sig
+from runar import SmartContract, PubKey, Sig, Addr, Readonly, public, assert_, hash160, check_sig
 class P2PKH(SmartContract):
-    pub_key_hash: Readonly[Ripemd160]
-    def __init__(self, pub_key_hash: Ripemd160):
+    pub_key_hash: Readonly[Addr]
+    def __init__(self, pub_key_hash: Addr):
         super().__init__(pub_key_hash)
         self.pub_key_hash = pub_key_hash
     @public
@@ -280,8 +280,8 @@ class P2PKH(SmartContract):
 ```solidity
 pragma runar ^0.1.0;
 contract P2PKH is SmartContract {
-    Ripemd160 immutable pubKeyHash;
-    constructor(Ripemd160 _pubKeyHash) {
+    Addr immutable pubKeyHash;
+    constructor(Addr _pubKeyHash) {
         pubKeyHash = _pubKeyHash;
     }
     function unlock(Sig sig, PubKey pubKey) public {
@@ -297,7 +297,7 @@ contract P2PKH is SmartContract {
 module p2pkh {
     use runar::*;
     struct P2PKH has key {
-        pub_key_hash: Ripemd160,
+        pub_key_hash: Addr,
     }
     public fun unlock(self: &P2PKH, sig: Sig, pub_key: PubKey) {
         assert!(hash160(&pub_key) == self.pub_key_hash);
