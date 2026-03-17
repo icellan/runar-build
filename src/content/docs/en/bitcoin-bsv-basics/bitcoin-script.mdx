@@ -100,7 +100,7 @@ Note that `OP_MUL`, `OP_DIV`, and `OP_MOD` were disabled in BTC but are fully av
 | `OP_CHECKMULTISIG` | `[sigs..., pubKeys...] -> [bool]` | Verify M-of-N multisig |
 | `OP_CHECKDATASIG` | `[sig, msg, pubKey] -> [bool]` | Verify signature on arbitrary data (restored in BSV) |
 
-`OP_CHECKSIG` is the cornerstone of authorization on Bitcoin. It verifies that a transaction input was signed by the holder of a specific private key. The OP_PUSH_TX technique (covered in [How Smart Contracts Work on BSV](/docs/en/bitcoin-bsv-basics/how-smart-contracts-work-on-bsv)) uses `OP_CHECKSIG` in a novel way to enable transaction introspection.
+`OP_CHECKSIG` is the cornerstone of authorization on Bitcoin. It verifies that a transaction input was signed by the holder of a specific private key. The OP_PUSH_TX technique (covered in [How Smart Contracts Work on BSV](/docs/bitcoin-bsv-basics/how-smart-contracts-work-on-bsv)) uses `OP_CHECKSIG` in a novel way to enable transaction introspection.
 
 ### Flow Control
 
@@ -238,4 +238,4 @@ Every step is deterministic and verifiable. The miner performs exactly these ope
 
 ## Next Steps
 
-Now that you understand how Bitcoin Script works, the next page covers [Transactions and Outputs](/docs/en/bitcoin-bsv-basics/transactions-and-outputs) --- the data structures that carry scripts on-chain and form the backbone of every contract interaction.
+Now that you understand how Bitcoin Script works, the next page covers [Transactions and Outputs](/docs/bitcoin-bsv-basics/transactions-and-outputs) --- the data structures that carry scripts on-chain and form the backbone of every contract interaction.

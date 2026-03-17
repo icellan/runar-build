@@ -212,7 +212,7 @@ const txid = await provider.broadcast(tx.toHex());
 
 ## Calling Stateful Contracts
 
-Stateful contracts require special handling because the spending transaction must create a continuation output. See [Stateful Contracts](/docs/en/sdk/inductive-contracts) for the full guide. Here is a brief example:
+Stateful contracts require special handling because the spending transaction must create a continuation output. See [Stateful Contracts](/docs/sdk/inductive-contracts) for the full guide. Here is a brief example:
 
 ```typescript
 // Increment a Counter contract
@@ -293,6 +293,6 @@ console.log(contract.state);  // { count: 1n }
 
 ## What's Next
 
-- [Stateful Contracts](/docs/en/sdk/inductive-contracts) -- In-depth guide to stateful contract interactions
-- [Token Contracts](/docs/en/sdk/token-contracts) -- Calling token transfer and merge methods
-- [Fee and Change Handling](/docs/en/sdk/fee-and-change-handling) -- Understanding fees in call transactions
+- [Stateful Contracts](/docs/sdk/inductive-contracts) -- In-depth guide to stateful contract interactions
+- [Token Contracts](/docs/sdk/token-contracts) -- Calling token transfer and merge methods
+- [Fee and Change Handling](/docs/sdk/fee-and-change-handling) -- Understanding fees in call transactions

@@ -169,7 +169,7 @@ In the test environment, cryptographic signature verification operations (`check
 
 Hashing operations (`sha256`, `hash256`, `hash160`, `ripemd160`) use **real implementations**. This lets you test hash-dependent logic (address derivation, commitment schemes) with accurate results.
 
-If you need to test that a contract rejects an invalid signature, use the `ScriptVM` directly with mocking disabled (see [Debugging Compiled Script](/docs/en/testing-and-debugging/debugging-script)).
+If you need to test that a contract rejects an invalid signature, use the `ScriptVM` directly with mocking disabled (see [Debugging Compiled Script](/docs/testing-and-debugging/debugging-script)).
 
 ## Testing State Transitions
 
