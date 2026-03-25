@@ -151,6 +151,12 @@ Example for a `Counter` contract:
 ]
 ```
 
+### Code Separator Fields
+
+**`codeSeparatorIndex`** (number, optional) -- The byte offset of the `OP_CODESEPARATOR` opcode in stateful contracts. Used by the SDK to compute the correct subscript for `OP_PUSH_TX` signature verification. Only present in stateful contract artifacts.
+
+**`codeSeparatorIndices`** (number[], optional) -- Array of byte offsets for contracts with multiple `OP_CODESEPARATOR` opcodes (one per public method in multi-method stateful contracts). Each entry corresponds to the code separator for the respective method in the dispatch table.
+
 ### Constructor Slots
 
 **`constructorSlots`** (array) -- Describes where constructor parameter placeholders appear in the compiled script. The SDK uses this information to splice actual values into the script at deployment time.

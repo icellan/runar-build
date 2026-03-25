@@ -1,0 +1,32 @@
+---
+title: "Changelog"
+description: "Release history for the Rúnar compiler and SDK."
+section: "changelog"
+order: 10
+lang: "en"
+---
+
+Release history for the Rúnar compiler, SDK, and toolchain. Each entry covers changes across all packages in the monorepo (compilers, SDKs, CLI, runtime libraries) since they are versioned and released together.
+
+## Releases
+
+| Version | Date | Highlights | Breaking |
+|---------|------|------------|----------|
+| [v0.4.1](/docs/changelog/v0-4) | 2026-03-25 | Zig/Ruby limitation fixes, source maps, DCE pass | No |
+| [v0.4.0](/docs/changelog/v0-4) | 2026-03-25 | Zig compiler, Ruby compiler, Ruby SDK | Yes |
+| [v0.3.4](/docs/changelog/v0-3) | 2026-03-21 | Source locations in diagnostics | No |
+| [v0.3.3](/docs/changelog/v0-3) | 2026-03-21 | ByteString state fields, init scaffold | No |
+| [v0.3.2](/docs/changelog/v0-3) | 2026-03-17 | addRawOutput fix | No |
+| [v0.3.1](/docs/changelog/v0-3) | 2026-03-17 | Codegen subpath export | Yes |
+| [v0.3.0](/docs/changelog/v0-3) | 2026-03-16 | BLAKE3, SHA-256, constant folding, real crypto | Yes |
+| [v0.2.0](/docs/changelog/v0-2) | 2026-03-09 | Initial release — 6 languages, 4 compilers, SDKs | No |
+
+## Versioning Policy
+
+Rúnar follows [semantic versioning](https://semver.org/). All packages in the monorepo share a single version number and are released together:
+
+- **Patch releases** (0.x.**Y**) contain bug fixes and non-breaking improvements.
+- **Minor releases** (0.**X**.0) add new features and may contain breaking changes while the project is pre-1.0.
+- **Major release** (1.0.0) has not yet been tagged. Until then, minor releases may include breaking changes, which are always documented with migration steps.
+
+All npm packages (`runar-lang`, `runar-compiler`, `runar-sdk`, `runar-testing`, `runar-cli`, `runar-ir-schema`), Go modules (`runar-go`), Rust crates (`runar-rs`, `runar-rs-macros`), Python packages (`runar-py`), the Zig package (`runar-zig`), and the Ruby gem (`runar-rb`) share the same version number. Per-package Go module tags (e.g. `packages/runar-go/v0.3.0`) are published alongside the main tag for Go module compatibility.

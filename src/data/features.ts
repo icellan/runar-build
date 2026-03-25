@@ -6,7 +6,7 @@ export interface Feature {
 export const features: Feature[] = [
   {
     title: 'Multi-Language Compiler',
-    description: 'Write contracts in TypeScript, Go, Rust, Python, Solidity, or Move. One compiler, many languages.',
+    description: 'Write contracts in TypeScript, Go, Rust, Python, Zig, Ruby, Solidity, or Move. One compiler, many languages.',
   },
   {
     title: 'Type-Safe SDK',

@@ -1,0 +1,224 @@
+---
+title: "v0.3.x"
+description: "Rúnar v0.3.0 through v0.3.4 release notes."
+section: "changelog"
+order: 30
+lang: "en"
+---
+
+## v0.3.4
+
+Released: 2026-03-21
+1 commit · v0.3.3 → v0.3.4
+
+A single-commit release adding source locations to compiler diagnostics for better developer experience.
+
+### New features
+
+**Source locations in compiler diagnostic messages**
+All diagnostic messages from the type checker (pass 3) now include file, line, and column information. The TypeScript parser (pass 1) attaches source locations to property access, member expression, and identifier AST nodes. An optional `sourceLocation` field was added to all Expression interfaces in the IR schema (additive, backward-compatible).
+
+---
+
+## v0.3.3
+
+Released: 2026-03-21
+5 commits · v0.3.2 → v0.3.3
+
+Adds ByteString as a mutable state field type, restructures the `runar init` scaffold, and fixes a critical bug where `checkSig` always returned false in published packages.
+
+### New features
+
+**ByteString support for stateful contract state fields**
+Variable-length `ByteString` can now be used as a mutable state field in `StatefulSmartContract`, across all four compilers. State serialization uses Bitcoin Script push-data encoding. Deserialization extracts state from the BIP-143 preimage by computing the offset from `_codePart`. Includes a MessageBoard example contract in all six input languages. Also exports `blake3Hash`, `blake3Compress`, `sha256Compress`, `sha256Finalize` from `runar-lang`.
+
+### Changes
+
+**Restructure `runar init` scaffold to match real-world project layout**
+The init command now generates a project with `contract/` as a self-contained package (its own `package.json`, `tsconfig`, vitest config) with an `integration/` subdirectory for regtest tests, and `src/generated/` for compiled artifacts and codegen wrappers. The root `package.json` includes compile, codegen, build, test, and `test:integration` scripts. Existing projects are unaffected; new projects will have the new structure.
+
+### Bug fixes
+
+**Fix checkSig always returning false in published packages**
+`ecPublicKeyFromBytes` in `ecdsa.ts` used `require('@bsv/sdk')` while the rest of the file used ESM `import`. In published packages, `require()` and `import` resolve to different CJS/ESM builds of `@bsv/sdk`, producing incompatible class instances. This caused `checkSig` to silently return false when using the published (not linked) `runar-testing` package. Fixed by replacing `require()` with a standard ESM import.
+
+<details>
+<summary>Internal changes</summary>
+
+- Publish script now prompts for npm OTP
+- Version bump to 0.3.3
+
+</details>
+
+---
+
+## v0.3.2
+
+Released: 2026-03-17
+4 commits · v0.3.1 → v0.3.2
+
+A patch release fixing `addRawOutput` support in the TypeScript toolchain.
+
+### Bug fixes
+
+**Wire addRawOutput in TypeScript type checker and test interpreter**
+`addRawOutput` was implemented in ANF lowering, stack lowering, and the Go/Rust/Python compilers but was missing from two places in the TypeScript toolchain. The type checker (pass 3) did not recognize `addRawOutput`, producing "Unknown method" errors at compile time. The test interpreter did not handle it, preventing contracts using `addRawOutput` from being tested via `TestContract`. This fix adds full validation (2 args: bigint satoshis, ByteString scriptBytes; `StatefulSmartContract` only) and 5 tests.
+
+<details>
+<summary>Internal changes</summary>
+
+- Release script resilience improvements
+- Version bump to 0.3.2
+
+</details>
+
+---
+
+## v0.3.1
+
+Released: 2026-03-17
+5 commits · v0.3.0 → v0.3.1
+
+A patch release moving codegen functions to a separate subpath export for browser compatibility.
+
+> **Breaking changes in this release**
+>
+> This release contains 1 breaking change. Read the migration notes before upgrading.
+
+### Breaking changes
+
+**Move codegen functions to separate subpath export**
+The main `runar-sdk` entry point previously re-exported codegen functions (`generateTypescript`, `generateGo`, `generateRust`, `generatePython`) that import `node:fs`, `node:path`, and `node:url`. This caused browser bundlers (Vite, Rollup, Webpack) to fail on import resolution.
+
+Codegen is now available at `runar-sdk/codegen`. The main entry point no longer exports these functions.
+
+**Migration:** Change all codegen imports:
+
+```typescript
+// Before (v0.3.0)
+import { generateTypescript } from 'runar-sdk';
+
+// After (v0.3.1+)
+import { generateTypescript } from 'runar-sdk/codegen';
+```
+
+Only affects users importing codegen functions directly. The rest of the `runar-sdk` API (`RunarContract`, `TokenWallet`, `computeNewState`, etc.) is unchanged.
+
+<details>
+<summary>Internal changes</summary>
+
+- Release scripts for version bumping and publishing
+- Cargo.lock updates
+- Version bump to 0.3.1
+
+</details>
+
+---
+
+## v0.3.0
+
+Released: 2026-03-16
+42 commits · v0.2.0 → v0.3.0
+
+A major feature release adding BLAKE3 and SHA-256 compression builtins, ANF constant folding across all four compilers, automatic state transition computation via ANF interpreters, multi-language code generation, real cryptographic verification replacing mocked stubs, and a fee rate unit change from sat/byte to sat/KB.
+
+> **Breaking changes in this release**
+>
+> This release contains 4 breaking changes. Read the migration notes for each before upgrading.
+
+### Breaking changes
+
+**Fee rate unit changed from sat/byte to sat/KB across all 4 SDKs**
+The `Provider` interface's `getFeeRate()` / `get_fee_rate()` / `GetFeeRate()` now returns satoshis per KB (1000 bytes) instead of satoshis per byte. The default fee rate changed from 1 to 100 (representing BSV's standard 0.1 sat/byte relay fee). The fee formula is now `ceil(txSize * feeRate / 1000)`.
+
+**Migration:**
+1. Custom `Provider` implementations: update `getFeeRate()` to return sat/KB (multiply old value by 1000).
+2. Manual fee calculations: divide by 1000 — `ceil(txSize * feeRate / 1000)`.
+3. Hardcoded fee rate overrides: update to sat/KB equivalent (e.g. `feeRate = 100` for 0.1 sat/byte).
+
+**SDK uses Transaction objects instead of raw hex**
+`buildCallTransaction` returns a `Transaction` object instead of a raw hex string. `broadcast` accepts `Transaction` objects. The `Transaction` type is renamed to `TransactionData` to avoid collision with `@bsv/sdk`.
+
+**Migration:** Update code that expects `buildCallTransaction` to return a hex string. Update references from `Transaction` to `TransactionData`.
+
+**Real crypto replacing mocked crypto** *(partial — tests only)*
+`checkSig`, `checkMultiSig`, and `verifyRabinSig` now perform real cryptographic verification instead of always returning true.
+
+**Migration:** Tests must provide real signatures using the provided test key helpers (e.g. `ALICE.pubKeyHash`, `signTestMessage(ALICE.privKey)`) instead of arbitrary hex strings. All example tests have been updated as reference.
+
+**Undefined variable detection** *(partial)*
+The type checker now emits errors for undefined variable references instead of silently returning `<unknown>`.
+
+**Migration:** Contracts with undefined variable references that previously compiled silently will now produce type-check errors. Fix by declaring or importing the referenced variables.
+
+### New features
+
+**BLAKE3 hash builtins across all 4 compilers**
+`blake3Compress` performs a single 7-round compression (~10.8K ops in Bitcoin Script). `blake3Hash` wraps it with IV initialization. Available in all six contract syntaxes with conformance golden-file tests and a P2Blake3PKH example contract.
+
+**SHA-256 compress and finalize builtins**
+`sha256Compress` and `sha256Finalize` enable inline SHA-256 partial-hash verification in Bitcoin Script. Real FIPS 180-4 implementations in all four SDKs (not mock stubs).
+
+**ArrayLiteralExpression and checkMultiSig support**
+Array literal expressions (`[expr1, expr2, ...]`) added to the AST and all four compilers. `checkMultiSig([sig1, sig2], [pk1, pk2, pk3])` emits the correct Bitcoin Script layout.
+
+**ByteString bitwise operators, addRawOutput, and OP_CODESEPARATOR**
+ByteString operands now support bitwise `&`, `|`, `^`, `~`. `addRawOutput(satoshis, scriptBytes)` creates outputs with arbitrary script. `OP_CODESEPARATOR` auto-inserted for stateful contracts; artifacts include `codeSeparatorIndex`/`codeSeparatorIndices` fields.
+
+**ANF constant folding across all 4 compilers**
+Evaluates compile-time-known expressions (arithmetic, bitwise, boolean, comparisons, shifts, ByteString concat, 13 pure math builtins). Enabled by default; `--disable-constant-folding` flag available.
+
+**ANF interpreter for automatic state transitions**
+Lightweight ANF interpreters in all four SDKs execute method bodies from the artifact's ANF IR to automatically compute new state after each call, eliminating the need to manually pass `newState`.
+
+**Template-based SDK code generation for Go, Rust, and Python**
+`runar codegen --lang go|rust|python|ts` generates typed contract wrapper classes using shared Mustache templates.
+
+**Real ECDSA and Rabin verification in all 4 languages**
+`checkSig`, `checkMultiSig`, and `verifyRabinSig` perform real cryptographic verification using a fixed test message. Pre-computed deterministic test keys (ALICE through JUDY) with matching DER signatures provided in all four languages.
+
+**`runar debug` CLI command**
+Interactive step-through debugger for compiled Bitcoin Script with breakpoints and source mapping.
+
+**Undefined variable detection and Go/Rust TS parsers**
+The type checker emits errors for undefined variable references. New hand-written Go and Rust parsers added to the TS compiler, enabling all six formats to be parsed by all four compilers.
+
+**Conditional addOutput inside if-statements**
+`addOutput` can now appear inside conditional if-statements across all four compilers, with correct stack balancing in the synthesized else-branch.
+
+### Bug fixes
+
+**Fix if-without-else silently skipping body in compiled Script**
+The else-branch pushed a generic `OP_0` placeholder instead of duplicating the current variable value, causing the post-ENDIF value to be 0 instead of the reassigned variable.
+
+**Fix EC optimizer alias rules**
+Alias emission changed from `load_param` to `load_const` with `@ref:` prefix across all four compilers, fixing runtime failures from invalid stack depth.
+
+**Fix stateful continuation using wrong satoshi amount**
+Added implicit `_newAmount` parameter to state-mutating methods so the SDK can pass the correct output amount.
+
+**Fix @ref: aliases in constant folding**
+The constant folder no longer registers `@ref:` prefixed strings as real string constants.
+
+**Fix fee calculation rounding in TypeScript SDK**
+Corrected ceiling division in fee computation.
+
+### Performance
+
+**OP_CODESEPARATOR reduces BIP-143 preimage size**
+Stateful contracts automatically include `OP_CODESEPARATOR`, reducing the preimage's `scriptCode` to only the portion after the separator. Significant size reduction for contracts with large locking scripts.
+
+### Security
+
+**Multi-method dispatch hardened to fail-closed**
+The last method in a multi-method contract no longer acts as a silent fallback. Invalid method selectors now cause script failure via `OP_NUMEQUALVERIFY`.
+
+<details>
+<summary>Internal changes</summary>
+
+- Conformance tests expanded to 27 cases across Go, Rust, and Python compilers
+- Unit test coverage synchronized across all four compilers
+- GitHub Actions workflow updates
+- `@bsv/sdk` upgraded to v2.0.7
+
+</details>

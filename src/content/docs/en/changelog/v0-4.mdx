@@ -1,0 +1,207 @@
+---
+title: "v0.4.x"
+description: "Rúnar v0.4.0 and v0.4.1 release notes."
+section: "changelog"
+order: 20
+lang: "en"
+---
+
+## v0.4.1
+
+Released: 2026-03-25
+2 commits · v0.4.0 → v0.4.1
+
+A patch release resolving all known limitations documented in the v0.4.0 Zig and Ruby compiler pages. The Zig compiler gains a standalone dead code elimination pass, full source map pipeline, FixedArray type resolution, and all crypto builtins are now fully wired. The Ruby compiler gets a real `compile_check` pipeline, correct ByteString truthiness in the ANF interpreter, configurable loop limits, and `RPCProvider#get_contract_utxo` via `scantxoutset`. Both compilers also gain their first unit test suites.
+
+### Bug fixes
+
+**Zig: Wire all crypto builtin emitters and fix status metadata**
+All 21 crypto builtins (EC operations, BLAKE3, WOTS+, SLH-DSA) now correctly report as `.implemented` in `statusOf()`. The emitters were already wired to `ec_emitters`, `blake3_emitters`, and `pq_emitters` but the status metadata still reported them as scaffolded.
+
+**Zig: Add FixedArray type resolution**
+New `fixed_array` variant in the `RunarType` enum with proper mapping from `FixedArrayType`. Previously resolved to `.unknown`, limiting type-checking. Now accepted in property validation and type-checker comparisons.
+
+**Zig: Enhance while loop support in `.runar.zig` parser**
+While loops now support `>`, `>=`, `!=` operators, reversed operands, and countdown patterns in addition to the previously supported `<` and `<=`.
+
+**Ruby: Fix ANF interpreter ByteString truthiness**
+Hex-encoded byte strings `"00"`, `"0000"`, and `"80"` (negative zero) now correctly evaluate as falsy in the ANF interpreter, matching on-chain Bitcoin Script `OP_IF` semantics. Previously all non-empty strings evaluated as truthy, causing state transition divergence between the interpreter and on-chain execution.
+
+**Ruby: Rewrite compile_check from placeholder to real pipeline**
+`Runar::CompileCheck` now invokes the full Parse → Validate → TypeCheck frontend via lazy-loaded `runar_compiler` gem instead of doing basic keyword checks. Returns structured error messages with the failing stage.
+
+**Ruby: Implement RPCProvider#get_contract_utxo**
+Uses `scantxoutset` RPC to scan the UTXO set for a contract's locking script. Graceful error handling for nodes that do not support the RPC method.
+
+**Ruby: Make ANF interpreter loop limit configurable**
+`compute_new_state` accepts a `max_loop_iterations` keyword argument (default: 65,536). The IR loader already validates `MAX_LOOP_COUNT = 10,000` at parse time.
+
+### New features
+
+**Zig: Standalone dead code elimination pass**
+Dead code elimination extracted from the EC optimizer into a standalone pass (`dce.zig`) that runs as pass 4.3 for all contracts, not just EC-heavy ones. The EC optimizer now delegates to the shared DCE module. This reduces compiled script size for all contracts by eliminating unused bindings.
+
+**Zig: Source map pipeline**
+The Zig compiler now produces source maps in compiled artifacts. The parser captures source locations on statements and methods, ANF lowering stamps them on bindings, stack lowering tracks per-instruction source locations, and the emitter records opcode-to-source mappings. The artifact JSON `sourceMap` array matches the format used by all other compilers.
+
+**Ruby: Add compiler unit test suite**
+16 tests across `test_compiler.rb` (7 integration tests with conformance golden files), `test_parser_ts.rb` (5), and `test_parser_ruby.rb` (4), with a Rakefile runner.
+
+<details>
+<summary>Internal changes</summary>
+
+- Version bump to 0.4.1 across all packages
+
+</details>
+
+---
+
+## v0.4.0
+
+Released: 2026-03-25
+200 commits · v0.3.4 → v0.4.0
+
+A landmark release adding two new language ecosystems. The Zig compiler (18K LOC) and Ruby compiler (16K LOC) bring the total to six independent compiler implementations and eight supported input languages. Both new compilers pass all 28 conformance tests and produce byte-identical Bitcoin Script to the TypeScript reference. Full deployment SDKs ship for both languages. Cross-compiler improvements include structured diagnostics with source locations, a CompileResult API for IDE integration, source maps in all compiler artifacts, and four security fixes including two critical vulnerabilities in the Zig compiler's stack lowering.
+
+> **Breaking changes in this release**
+>
+> This release contains 1 breaking change affecting the Ruby contract format only. Read the migration notes before upgrading.
+
+### Breaking changes
+
+**Drop trailing-underscore convention from Ruby builtin names**
+Ruby builtins `sign_`, `pow_`, `sqrt_`, `gcd_`, `divmod_`, `log2_`, `len_`, and `bool_cast` are renamed to `sign`, `pow`, `sqrt`, `gcd`, `divmod`, `log2`, `len`, and `bool` respectively. The trailing underscores were scope bleed from the Python format where built-in names clash with Python's `Kernel` functions; Ruby has no such conflict. Compiled Bitcoin Script output is unchanged.
+
+**Migration:** Rename all calls in `.runar.rb` files: `sign_` → `sign`, `pow_` → `pow`, `sqrt_` → `sqrt`, `gcd_` → `gcd`, `divmod_` → `divmod`, `log2_` → `log2`, `len_` → `len`, `bool_cast` → `bool`. No recompilation needed.
+
+### New languages
+
+**Zig compiler with full 6-pass compilation pipeline**
+Native Zig implementation of the complete Rúnar compilation pipeline: `.runar.zig` and `.runar.ts` parsers, AST validator, type checker with 60+ builtin signatures, ANF lowering, constant folding, EC algebraic optimizer (12 rules with secp256k1 curve order), stack lowering, peephole optimizer, and hex emission. Built for Zig 0.14+ with zero dependencies beyond `std`. All 28 conformance tests pass.
+
+```zig
+const runar = @import("runar");
+
+pub const P2PKH = struct {
+    pub const Contract = runar.SmartContract;
+    pubKeyHash: runar.Addr,
+
+    pub fn init(pubKeyHash: runar.Addr) P2PKH {
+        return .{ .pubKeyHash = pubKeyHash };
+    }
+
+    pub fn unlock(self: *const P2PKH, sig: runar.Sig, pubKey: runar.PubKey) void {
+        runar.assert(runar.bytesEq(runar.hash160(pubKey), self.pubKeyHash));
+        runar.assert(runar.checkSig(sig, pubKey));
+    }
+};
+```
+
+**Native Ruby compiler with full 6-pass pipeline**
+Pure Ruby implementation producing byte-identical Bitcoin Script across all 28 conformance tests. Includes parsers for `.runar.rb` and `.runar.ts`, AST validator, type checker with 70+ builtin signatures, ANF lowering with constant folding and EC optimization, stack lowering, peephole optimizer, and hex emission. Specialized codegen for secp256k1, SLH-DSA (FIPS 205), SHA-256, and BLAKE3. Zero external gem dependencies. CLI at `bin/runar-compiler-ruby`.
+
+```ruby
+require 'runar'
+
+class P2PKH < Runar::SmartContract
+  prop :pub_key_hash, Addr
+
+  def initialize(pub_key_hash)
+    super(pub_key_hash)
+    @pub_key_hash = pub_key_hash
+  end
+
+  runar_public sig: Sig, pub_key: PubKey
+  def unlock(sig, pub_key)
+    assert hash160(pub_key) == @pub_key_hash
+    assert check_sig(sig, pub_key)
+  end
+end
+```
+
+### New features
+
+**Zig deployment SDK with transaction building and signing**
+Complete deployment SDK in `packages/runar-zig`: `RunarArtifact` JSON parser, state serialization/deserialization, UTXO selection, fee estimation, P2PKH script building, deploy and call transaction construction. Uses `bsvz` for all Bitcoin primitives including BIP-143 sighash and BIP-62 low-S ECDSA signing. Supports stateless and stateful contract invocation with OP_PUSH_TX, two-pass preimage convergence, and multi-method dispatch. Integration tests cover 15 contracts.
+
+**Ruby gem with base classes, type system, crypto, and EC operations**
+The `runar-rb` gem provides `SmartContract` and `StatefulSmartContract` base classes, a custom DSL (`prop`, `runar_public`, `params`), all 13 Rúnar type constants, mock and real crypto implementations (SHA-256, RIPEMD-160, ECDSA, Rabin), full math builtins, byte operations, and pure-Ruby secp256k1 EC operations. 85 RSpec examples.
+
+**Ruby deployment SDK**
+Full SDK in `packages/runar-rb`: types and interfaces, state serialization, deploy and call transaction building, OP_PUSH_TX BIP-143 preimage computation with k=1 ECDSA signing, `MockSigner`/`ExternalSigner`/`LocalSigner`, `MockProvider`/`RPCProvider`, and `RunarContract` lifecycle with constructor slot splicing. 322 unit specs.
+
+**Ruby SDK codegen for typed wrapper generation**
+Template-based typed wrapper generation from `RunarArtifact` metadata. Generated wrappers provide typed constructors, public methods with hidden internal params, and prepare/finalize flows for external signing.
+
+**Ruby ANF interpreter for automatic state transitions**
+Port of the ANF interpreter (~670 LOC) that evaluates ANF IR bindings to auto-compute state transitions for stateful contracts. Wired into `RunarContract` for automatic state updates when ANF data is present in the artifact.
+
+**Ruby LSP addon for IDE support**
+A Ruby LSP addon for `.runar.rb` files: `IndexingEnhancement` for `prop` declarations (go-to-definition, hover), completion listener for types and builtins, and hover listener with parameter type information from `runar_public`/`params` annotations.
+
+**Ruby parser added to TypeScript, Go, Rust, and Python compilers**
+All four existing compilers can now parse and compile `.runar.rb` source files. Each implementation is a hand-written tokenizer plus recursive-descent parser handling `prop` declarations, `runar_public` visibility, `@instance_var` mapping, snake_case to camelCase conversion, and all builtin function name mappings.
+
+**Zig parser added to TypeScript compiler**
+The TypeScript compiler frontend can now parse `.runar.zig` source files, including `@import("runar")`, `@builtin` support, and `while` loops.
+
+**`runar init --lang zig` and `codegen --lang zig`**
+CLI support for Zig project scaffolding (generates `build.zig`, `build.zig.zon`, a `P2PKH.runar.zig` template, and a compile-check test) and Zig SDK codegen from compiled artifacts.
+
+**Zig and Ruby in cross-compiler conformance runner**
+Both compilers registered as conformance participants with 28 test variants each. The runner now tests six compiler implementations across eight input formats.
+
+**Structured Diagnostic types with source locations in all compilers**
+Go, Rust, Python, and Zig compilers now emit structured `Diagnostic` objects with `message`, `severity`, and optional `SourceLocation` (file, line, column) instead of plain error strings. Backward-compatible `error_strings()`/`ErrorStrings()` helpers provided.
+
+> **Note:** If you access `ParseResult.Errors` (Go), `ParseResult.errors` (Rust), or `parse_result.errors` (Python) directly as strings, switch to `error_strings()`/`ErrorStrings()` or access the `.message` field on each `Diagnostic`.
+
+**CompileResult API with partial results in Go and Python compilers**
+New `CompileResult` type captures partial compilation results (contract, ANF, diagnostics) even when later passes fail. Supports `parse_only`, `validate_only`, and `typecheck_only` early-exit options for IDE integration. Each pass wrapped in panic recovery.
+
+**Source maps and IR debug snapshots in Go, Rust, and Python artifacts**
+Source locations flow from AST nodes through ANF bindings and stack lowering to emission, producing `SourceMapping` entries (opcodeIndex → file/line/column). Controlled by `IncludeSourceMap`/`IncludeIR` compile options.
+
+**constructorArgs option in Go, Rust, and Python compile pipelines**
+Bakes property values into the locking script at compile time, replacing `OP_0` placeholders with real push data. Applied after ANF lowering and before constant folding.
+
+### Bug fixes
+
+**Add missing codeSeparatorIndex, codeSeparatorIndices, and ANF to Go Artifact**
+The Go `Artifact` struct was missing these fields, breaking stateful contract deployment from Go-compiled artifacts (the SDK needs `codeSeparatorIndex` for BIP-143 sighash computation and ANF for state transitions).
+
+**Replace panics with graceful error returns in Rust and Python codegen**
+Rust `lower_to_stack()` wrapped in `std::panic::catch_unwind` to convert panics into `Result::Err`. Python gains `try`/`except` to capture unexpected exceptions as diagnostics.
+
+### Security
+
+**CRITICAL: Fix stack lowering and JSON parser vulnerabilities in Zig compiler**
+If/else branch stack depth reconciliation now returns an error if branches leave the stack at different depths, preventing silently generated Bitcoin Script where one execution path has wrong stack state. `lowerPropertyRead` now consumes (ROLL) on last use instead of always copying (PICK), preventing unbounded stack growth. JSON parser recursion depth limited to 256 to prevent stack overflow DoS.
+
+**HIGH: Parser depth limits, readonly mutation block, addOutput restriction**
+Parser recursion depth limited to 256 in both `.runar.zig` and `.runar.ts` parsers. Readonly property mutation via `++`/`--` blocked in ANF lowering. `addOutput`/`addRawOutput` rejected in stateless `SmartContract`.
+
+**HIGH: Reject high-S and enforce strict DER encoding in Ruby ECDSA**
+BIP-62 rule 5 (SCRIPT_VERIFY_LOW_S) enforcement and BIP-66 strict DER encoding in `ecdsa_verify`: rejects zero-length r/s components and non-minimal leading `0x00` padding bytes.
+
+**MEDIUM: Cap ANF interpreter loop iterations at 65,536 in Ruby SDK**
+Prevents unbounded memory/CPU consumption from malformed artifacts in the offline state simulation interpreter.
+
+<details>
+<summary>Internal changes</summary>
+
+- Ruby conformance test variants for all 28 golden-file tests
+- Zig conformance contracts for all 28 test directories
+- Ruby integration test suite (15 tests against regtest node)
+- Zig integration tests for regtest deployment (15 contracts)
+- Ruby end-to-end PriceBet example with regtest demo
+- 26 Zig example contracts with native tests
+- 22 Ruby example contracts with RSpec tests
+- Ruby parser negative tests and implicit return support
+- Timing side-channel warning and test-only key labels
+- Zig @builtin parser support and while loop in TS parser
+- bsvz wired as dependency for runar-zig
+- CI pipeline updates for Ruby and Zig compilers
+- Version bump to 0.4.0
+
+</details>

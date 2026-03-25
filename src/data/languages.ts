@@ -69,6 +69,34 @@ impl Counter {
         self.count += 1`,
   },
   {
+    name: 'Zig',
+    status: 'experimental',
+    lang: 'c',
+    snippet: `const runar = @import("runar");
+
+pub const Counter = struct {
+    pub const Contract = runar.StatefulSmartContract;
+    count: i64 = 0,
+
+    pub fn increment(self: *Counter) void {
+        self.count += 1;
+    }
+};`,
+  },
+  {
+    name: 'Ruby',
+    status: 'experimental',
+    lang: 'ruby',
+    snippet: `class Counter < Runar::StatefulSmartContract
+  prop :count, Bigint
+
+  runar_public
+  def increment
+    @count += 1
+  end
+end`,
+  },
+  {
     name: 'Solidity',
     status: 'experimental',
     lang: 'solidity',

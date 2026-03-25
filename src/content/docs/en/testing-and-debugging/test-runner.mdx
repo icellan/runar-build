@@ -191,7 +191,7 @@ This is primarily a compiler development tool, but contract authors can use it t
 
 ## Cross-Compiler Conformance
 
-Runar supports four frontend languages (TypeScript, Solidity, Move, Python). The conformance test suite verifies that the same logical contract produces identical compiled output regardless of the source language. It works by comparing SHA-256 hashes of the compiled artifact against golden files:
+Runar supports **eight** frontend languages (TypeScript, Go, Rust, Python, Zig, Ruby, Solidity, Move). The conformance test suite verifies that the same logical contract produces identical compiled output regardless of the source language. It works by comparing SHA-256 hashes of the compiled artifact against golden files:
 
 The conformance suite is run as part of the project's internal test infrastructure. The golden files live in `tests/golden/` and contain the expected SHA-256 hash for each contract/compiler combination. A mismatch indicates a compiler regression or an intentional change that requires updating the golden files.
 

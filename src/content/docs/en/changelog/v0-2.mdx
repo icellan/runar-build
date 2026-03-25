@@ -1,0 +1,82 @@
+---
+title: "v0.2.0"
+description: "Rúnar v0.2.0 — Initial release."
+section: "changelog"
+order: 40
+lang: "en"
+---
+
+## v0.2.0
+
+Released: 2026-03-09
+98 commits — initial release
+
+The first tagged release of the Rúnar compiler. Establishes the core architecture: a six-pass nanopass compiler that accepts six input languages (TypeScript, Go, Rust, Python, Solidity, Move), four independent compiler implementations that produce byte-identical Bitcoin Script, deployment SDKs in four languages, and a comprehensive testing and conformance infrastructure. Includes 16 example contracts, 25 conformance tests, and integration test suites against BSV regtest nodes.
+
+### New features
+
+**Six input languages compile to Bitcoin Script through a unified pipeline**
+Rúnar accepts smart contracts written in TypeScript (`.runar.ts`), Go (`.runar.go`), Rust (`.runar.rs`), Python (`.runar.py`), Solidity-like (`.runar.sol`), and Move-style (`.runar.move`). All six formats parse into the same `ContractNode` AST and pass through identical compilation passes. TypeScript is the primary format; Go, Rust, and Python are stable; Solidity and Move are experimental.
+
+**Four compiler implementations with cross-compiler conformance**
+Four independent compilers (TypeScript, Go, Rust, Python) each implement the full pipeline from source to Bitcoin Script. A conformance suite of 25 golden-file tests enforces byte-identical ANF IR output across all four compilers.
+
+**Six-pass nanopass compiler architecture**
+The compiler is structured as six composable passes: Parse, Validate, Type-check, ANF Lower, Stack Lower, and Emit. A constant-folding optimizer runs between passes 4 and 5, a peephole optimizer between passes 5 and 6, and an ANF EC optimizer reduces elliptic curve operation size.
+
+**Stateless and stateful smart contract models**
+Contracts extend `SmartContract` (stateless, all properties readonly) or `StatefulSmartContract` (mutable state carried across transactions via OP_PUSH_TX). Stateful contracts support `this.addOutput()` for multi-output state continuation, enabling token splitting and merging patterns.
+
+**Property initializers with default values**
+Contract properties can declare default values (e.g. `count: bigint = 0n`), simplifying constructor definitions.
+
+**40+ built-in functions mapped to Bitcoin Script opcodes**
+Cryptographic hashes (`sha256`, `ripemd160`, `hash160`, `hash256`), signature verification (`checkSig`, `checkMultiSig`), byte manipulation (`cat`, `substr`, `left`, `right`, `split`, `reverseBytes`, `num2bin`, `bin2num`), math operations (`abs`, `min`, `max`, `pow`, `sqrt`, `gcd`, `log2`, `mulDiv`, `percentOf`, `safediv`, `safemod`, `clamp`, `sign`, `divmod`), and control (`assert`, `within`, `bool`).
+
+**Post-quantum signature verification: WOTS+ and SLH-DSA (FIPS 205)**
+`verifyWOTS()` implements WOTS+ chain verification with RFC 8391 tweakable hashing. `verifySLHDSA` implements six SLH-DSA parameter sets (SHA2-128s/f, SHA2-192s/f, SHA2-256s/f) per FIPS 205. Hybrid ECDSA + post-quantum wallet examples are included.
+
+**Elliptic curve operations (secp256k1) in Bitcoin Script**
+Ten EC built-in functions: `ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `ecModReduce`, `ecEncodeCompressed`, `ecMakePoint`, `ecPointX`, `ecPointY`. An ANF EC optimizer eliminates redundant operations.
+
+**Rabin signature oracle verification**
+`verifyRabinSig()` compiles to on-chain Rabin signature verification for oracle-authenticated data feeds.
+
+**Deployment SDKs in four languages**
+TypeScript, Go, Rust, and Python SDKs provide: `RunarContract` lifecycle management, providers (`WhatsOnChainProvider`, `RPCProvider`, `MockProvider`), signers (`LocalSigner`, `ExternalSigner`, `WalletSigner`), `prepareCall`/`finalizeCall` for multi-signer workflows, state serialization, OP_PUSH_TX computation, UTXO selection, fee estimation, and `TokenWallet` for fungible tokens.
+
+**Typed contract codegen**
+`runar codegen` generates typed wrapper classes from compiled artifacts in TypeScript.
+
+**CLI with compile, test, deploy, verify, codegen, and init commands**
+The `runar` CLI provides project scaffolding, compilation, testing, deployment, on-chain verification, and code generation.
+
+**Testing infrastructure**
+`TestContract` for off-chain contract simulation, a Bitcoin Script VM for execution verification, a reference interpreter for differential testing, and a contract fuzzer using fast-check combinators.
+
+**Off-chain contract simulation via `runar-lang/runtime`**
+Working `SmartContract` and `StatefulSmartContract` base classes for off-chain simulation without the Bitcoin VM.
+
+**Token abstractions: FungibleToken and SimpleNFT**
+Base classes with canonical transfer, merge, split (FT) and transfer, burn (NFT) operations using OP_PUSH_TX state continuation.
+
+**16 example contracts in all six formats**
+P2PKH, Escrow, Counter, Auction, CovenantVault, OraclePriceFeed, FungibleToken, SimpleNFT, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, FunctionPatterns, MathDemo, ConvergenceProof, ECDemo, and BoundedCounter.
+
+**Integration tests against BSV regtest and Teranode**
+Four language suites (Go, TypeScript, Rust, Python) deploy and exercise contracts against real BSV nodes.
+
+**End-to-end demo applications**
+PriceBet (five formats with Go webapp) and Blackjack (stateful contract with Go webapp, deck verification, and regtest settlement).
+
+<details>
+<summary>Internal changes</summary>
+
+- CI pipeline with GitHub Actions covering all four compilers, conformance, examples, and integration tests
+- Language specification documents (9 spec files) and academic whitepaper in LaTeX
+- CLAUDE.md project guide for development conventions
+- Full project rename from TSOP to Rúnar
+- JSON IR schema definitions for all intermediate representations
+- Publishing infrastructure for npm, crates.io, and PyPI
+
+</details>

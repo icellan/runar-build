@@ -34,6 +34,8 @@ You only need these if you plan to write contracts in the corresponding language
 - **Go 1.26+** -- Only required if using the native Go compiler. The TypeScript compiler can compile `.runar.go` files without Go installed. Install from [go.dev](https://go.dev/dl/).
 - **Rust (latest stable)** -- Only required if using the native Rust compiler. Install via [rustup](https://rustup.rs/).
 - **Python 3.10+** -- Only required if using the native Python compiler. Install from [python.org](https://www.python.org/downloads/) or your system package manager.
+- **Zig 0.14+** -- Only required if using the native Zig compiler. Install from [ziglang.org](https://ziglang.org/download/).
+- **Ruby 3.0+** -- Only required if using the native Ruby compiler. Install from [ruby-lang.org](https://www.ruby-lang.org/en/downloads/) or use a version manager like `rbenv`.
 
 ## Installation
 
@@ -144,6 +146,8 @@ Because Rúnar contracts are written in standard programming languages, your exi
 - **Go contracts** (`.runar.go`) -- The standard Go extension or `gopls` language server works as expected.
 - **Rust contracts** (`.runar.rs`) -- `rust-analyzer` provides full IDE support.
 - **Python contracts** (`.runar.py`) -- Pylance, Pyright, or any Python language server works.
+- **Zig contracts** (`.runar.zig`) -- Use any editor with Zig support; [ZLS](https://github.com/zigtools/zls) (the Zig Language Server) provides autocomplete and diagnostics.
+- **Ruby contracts** (`.runar.rb`) -- Use [Ruby LSP](https://github.com/Shopify/ruby-lsp) with the Runar addon for full language support.
 
 The `.runar.*` file extensions are recognized by the Rúnar compiler but are otherwise standard source files in their respective languages. Your editor will provide syntax highlighting, code navigation, and refactoring support without any additional configuration.
 

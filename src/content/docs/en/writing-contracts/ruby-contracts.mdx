@@ -1,0 +1,477 @@
+---
+title: "Ruby Contracts"
+description: "Writing contracts in Ruby."
+section: "writing-contracts"
+order: 48
+lang: "en"
+---
+
+Ruby is a supported language for writing Runar smart contracts. Use Ruby's expressive class syntax, a purpose-built DSL with `prop` declarations and `runar_public` markers, and familiar `@instance_variable` access to define contracts that compile to Bitcoin Script. The Ruby frontend compiles through the same intermediate representation as all other Runar languages, producing identical Bitcoin Script output. Ruby contracts (`.runar.rb` files) can be compiled by all six compiler implementations.
+
+> **Status:** Experimental — The Ruby compiler passes all 28 conformance tests and produces byte-identical output. A full Ruby SDK with deployment, calling, OP_PUSH_TX support, and real `compile_check` validation is available. The ANF interpreter correctly handles ByteString truthiness matching on-chain semantics. A Ruby LSP addon provides IDE support with hover and completion.
+
+## Prerequisites
+
+- **Ruby 3.0+** installed on your system
+- The `runar` gem (installed automatically when using the Runar CLI with Ruby contracts)
+
+## File Extension and Project Structure
+
+Ruby contract files use the `.runar.rb` extension. Each file contains exactly one contract class:
+
+```
+contracts/
+  P2PKH.runar.rb
+  Counter.runar.rb
+  Escrow.runar.rb
+  Auction.runar.rb
+```
+
+Every contract file begins with a require statement:
+
+```ruby
+require 'runar'
+```
+
+The `runar` gem provides the base contract classes (`Runar::SmartContract`, `Runar::StatefulSmartContract`), all on-chain types (`PubKey`, `Sig`, etc.), and all built-in functions (`check_sig`, `hash160`, etc.).
+
+## The Ruby DSL
+
+Ruby contracts use a purpose-built DSL for declaring properties and methods:
+
+- **`prop :name, Type`** -- Declares a typed property on the contract
+- **`prop :name, Type, readonly: true`** -- Declares a readonly property (baked into locking script)
+- **`prop :name, Type, default: value`** -- Declares a property with a default value
+- **`runar_public [param: Type, ...]`** -- Marks the next method as a public entry point with typed parameters
+- **`params param: Type, ...`** -- Declares parameter types for a private method
+- **`@instance_var`** -- Accesses a contract property (maps to `this.prop` in the IR)
+
+## Stateless Contracts
+
+A stateless contract inherits from `Runar::SmartContract`. All properties are readonly (implicit for `SmartContract`). Public methods are preceded by `runar_public`.
+
+### P2PKH in Ruby
+
+```ruby
+require 'runar'
+
+class P2PKH < Runar::SmartContract
+  prop :pub_key_hash, Addr
+
+  def initialize(pub_key_hash)
+    super(pub_key_hash)
+    @pub_key_hash = pub_key_hash
+  end
+
+  runar_public sig: Sig, pub_key: PubKey
+  def unlock(sig, pub_key)
+    assert hash160(pub_key) == @pub_key_hash
+    assert check_sig(sig, pub_key)
+  end
+end
+```
+
+Key points:
+
+- **`class P2PKH < Runar::SmartContract`** defines a stateless contract. All properties in a `SmartContract` are implicitly readonly.
+- **`prop :pub_key_hash, Addr`** declares a typed property. In a `SmartContract`, all props are baked into the locking script.
+- **`runar_public sig: Sig, pub_key: PubKey`** marks the next method as public and declares parameter types. This replaces decorators.
+- **`assert`** is the assertion function. Every public method must call it at least once.
+- **`@pub_key_hash`** accesses the contract property using Ruby instance variable syntax.
+- **`initialize`** is the constructor. It must call `super()` with all readonly values.
+- **snake_case** names in Ruby source are automatically converted to camelCase in the compiled output.
+
+### Escrow in Ruby
+
+```ruby
+require 'runar'
+
+class Escrow < Runar::SmartContract
+  prop :buyer, PubKey
+  prop :seller, PubKey
+  prop :arbiter, PubKey
+
+  def initialize(buyer, seller, arbiter)
+    super(buyer, seller, arbiter)
+    @buyer = buyer
+    @seller = seller
+    @arbiter = arbiter
+  end
+
+  runar_public seller_sig: Sig, arbiter_sig: Sig
+  def release(seller_sig, arbiter_sig)
+    assert check_sig(seller_sig, @seller)
+    assert check_sig(arbiter_sig, @arbiter)
+  end
+
+  runar_public buyer_sig: Sig, arbiter_sig: Sig
+  def refund(buyer_sig, arbiter_sig)
+    assert check_sig(buyer_sig, @buyer)
+    assert check_sig(arbiter_sig, @arbiter)
+  end
+end
+```
+
+## Stateful Contracts
+
+A stateful contract inherits from `Runar::StatefulSmartContract`. Mutable state fields use `prop` without `readonly: true`. The compiler automatically handles preimage verification and state continuation.
+
+### Counter in Ruby
+
+```ruby
+require 'runar'
+
+class Counter < Runar::StatefulSmartContract
+  prop :count, Bigint
+
+  def initialize(count)
+    super(count)
+    @count = count
+  end
+
+  runar_public
+  def increment
+    @count += 1
+  end
+
+  runar_public
+  def decrement
+    assert @count > 0
+    @count -= 1
+  end
+end
+```
+
+When `increment` is called, the spending transaction must create a new output containing a `Counter` with the updated `@count`. The compiler enforces this automatically through the OP_PUSH_TX pattern.
+
+### Auction: Stateful with Preimage Introspection
+
+This example demonstrates a stateful contract with both readonly and mutable fields, deadline enforcement via `extract_locktime`, and terminal methods.
+
+```ruby
+require 'runar'
+
+class Auction < Runar::StatefulSmartContract
+  prop :auctioneer, PubKey, readonly: true
+  prop :highest_bidder, PubKey
+  prop :highest_bid, Bigint
+  prop :deadline, Bigint, readonly: true
+
+  def initialize(auctioneer, highest_bidder, highest_bid, deadline)
+    super(auctioneer, highest_bidder, highest_bid, deadline)
+    @auctioneer = auctioneer
+    @highest_bidder = highest_bidder
+    @highest_bid = highest_bid
+    @deadline = deadline
+  end
+
+  runar_public sig: Sig, bidder: PubKey, bid_amount: Bigint
+  def bid(sig, bidder, bid_amount)
+    assert check_sig(sig, bidder)
+    assert bid_amount > @highest_bid
+    assert extract_locktime(@tx_preimage) < @deadline
+    @highest_bidder = bidder
+    @highest_bid = bid_amount
+  end
+
+  runar_public sig: Sig
+  def close(sig)
+    assert check_sig(sig, @auctioneer)
+    assert extract_locktime(@tx_preimage) >= @deadline
+  end
+end
+```
+
+Note that `@tx_preimage` is automatically available in stateful contracts for preimage introspection.
+
+## Types in Ruby Contracts
+
+The `runar` gem provides all on-chain types. Ruby's type names are used in `prop` declarations and `runar_public` parameter annotations.
+
+| Ruby Type | Equivalent TypeScript Type | Description |
+| --- | --- | --- |
+| `Bigint` | `bigint` | Integer values. The only numeric type allowed. |
+| `Boolean` | `boolean` | Boolean values. |
+| `ByteString` | `ByteString` | Variable-length byte sequence. |
+| `PubKey` | `PubKey` | 33-byte compressed public key. |
+| `Sig` | `Sig` | DER-encoded signature (affine type -- consumed at most once). |
+| `Sha256` | `Sha256` | 32-byte SHA-256 digest. |
+| `Ripemd160` | `Ripemd160` | 20-byte RIPEMD-160 digest. |
+| `Addr` | `Addr` | 20-byte address. |
+| `SigHashPreimage` | `SigHashPreimage` | Transaction preimage (affine type). |
+| `Point` | `Point` | 64-byte elliptic curve point. |
+| `RabinSig` | `RabinSig` | Rabin signature. |
+| `RabinPubKey` | `RabinPubKey` | Rabin public key. |
+
+### Property Options
+
+The `prop` declaration supports several options:
+
+```ruby
+prop :owner, PubKey                          # readonly in SmartContract, mutable in Stateful
+prop :owner, PubKey, readonly: true          # explicitly readonly (baked into locking script)
+prop :count, Bigint, default: 0              # default value
+prop :prefix, ByteString, readonly: true, default: '1976a914'  # readonly with default
+```
+
+### String Literals
+
+In Ruby contracts, single-quoted strings are hex ByteString literals and double-quoted strings are regular strings:
+
+```ruby
+prop :prefix, ByteString, readonly: true, default: '1976a914'   # hex bytes
+prop :player_o, PubKey, default: '00' * 33                       # 33 zero bytes
+```
+
+## Built-in Functions
+
+All built-in functions are available directly in contract methods. They follow Ruby's snake_case naming convention.
+
+### Cryptographic Functions
+
+```ruby
+check_sig(sig, pub_key)
+check_multi_sig(sigs, pub_keys)
+hash256(data)
+hash160(data)
+sha256(data)
+ripemd160(data)
+check_preimage(preimage)
+```
+
+### Byte Operations
+
+```ruby
+len(data)
+cat(a, b)
+substr(data, start, length)
+left(data, length)
+right(data, length)
+reverse_bytes(data)
+to_byte_string(value)
+```
+
+### Conversion Functions
+
+```ruby
+num2bin(num, length)
+bin2num(data)
+int2str(num, byte_len)
+```
+
+### Math Functions
+
+```ruby
+abs(x)
+min(a, b)
+max(a, b)
+within(x, low, high)
+safediv(a, b)
+safemod(a, b)
+clamp(x, low, high)
+pow(base, exp)
+sqrt(x)
+gcd(a, b)
+mul_div(value, numerator, denominator)
+percent_of(amount, basis_points)
+```
+
+### Elliptic Curve Operations
+
+```ruby
+ec_add(p1, p2)
+ec_mul(point, scalar)
+ec_mul_gen(scalar)
+ec_negate(point)
+ec_on_curve(point)
+ec_mod_reduce(scalar)
+ec_encode_compressed(point)
+ec_make_point(x, y)
+ec_point_x(point)
+ec_point_y(point)
+```
+
+### Post-Quantum Functions
+
+```ruby
+verify_wots(message, sig, pubkey)
+verify_slh_dsa_sha2_128s(message, sig, pubkey)
+# Also: 128f, 192s, 192f, 256s, 256f variants
+```
+
+### Preimage Introspection
+
+```ruby
+extract_version(preimage)
+extract_hash_prevouts(preimage)
+extract_hash_sequence(preimage)
+extract_outpoint(preimage)
+extract_input_index(preimage)
+extract_script_code(preimage)
+extract_amount(preimage)
+extract_sequence(preimage)
+extract_output_hash(preimage)
+extract_outputs(preimage)
+extract_locktime(preimage)
+extract_sig_hash_type(preimage)
+```
+
+### Control Functions
+
+```ruby
+assert condition
+```
+
+## Private Methods with Type Annotations
+
+Private methods (without `runar_public`) are inlined at each call site during compilation. Use `params` to declare their parameter types, and `private` to group them:
+
+```ruby
+class FunctionPatterns < Runar::StatefulSmartContract
+  prop :owner, PubKey, readonly: true
+  prop :balance, Bigint
+
+  runar_public sig: Sig, amount: Bigint, fee_bps: Bigint
+  def withdraw(sig, amount, fee_bps)
+    _require_owner(sig)
+    fee = _compute_fee(amount, fee_bps)
+    assert amount + fee <= @balance
+    @balance -= amount + fee
+  end
+
+  private
+
+  params sig: Sig
+  def _require_owner(sig)
+    assert check_sig(sig, @owner)
+  end
+
+  params amount: Bigint, fee_bps: Bigint
+  def _compute_fee(amount, fee_bps)
+    percent_of(amount, fee_bps)
+  end
+end
+```
+
+The leading underscore is a Ruby convention for private members, but it is the `private` keyword and absence of `runar_public` that determine visibility to the compiler.
+
+## Control Flow
+
+### Conditionals
+
+Standard Ruby `if`/`elsif`/`else` and `unless` work:
+
+```ruby
+if @turn == 1
+  @turn = 2
+else
+  @turn = 1
+end
+
+unless @count == 0
+  @count -= 1
+end
+```
+
+Ruby's ternary expressions and inline conditionals also work:
+
+```ruby
+fee = amount > 1000 ? 10 : 1
+```
+
+### For Loops
+
+Only `for` loops with constant bounds are allowed:
+
+```ruby
+for i in 0...10
+  total += balances[i]
+end
+```
+
+Note: `0...10` (exclusive) produces the range 0-9, while `0..9` (inclusive) also produces 0-9.
+
+### Boolean Operators
+
+Ruby's `and`/`or`/`not` keywords work alongside `&&`/`||`/`!`:
+
+```ruby
+assert check_sig(sig, @owner) and amount > 0
+```
+
+## Disallowed Ruby Features
+
+The following Ruby features are not available in contracts:
+
+- `while`/`until` loops
+- Recursion
+- Blocks, procs, and lambdas
+- `require` (only `'runar'` is allowed)
+- `begin`/`rescue`/`ensure`
+- Modules (as contract types)
+- Multiple classes per file
+- Metaprogramming (`define_method`, `method_missing`, `eval`, `send`)
+- Standard library imports
+- `Struct`, `OpenStruct`, `Hash`, `Array` (dynamic collections)
+- `String` (use `ByteString`)
+- `Float`, `Complex`, `Rational` (use `Bigint`)
+- `nil` type
+- Class methods and `self.method` definitions
+- `attr_reader`/`attr_writer`/`attr_accessor` (use `prop`)
+- Multiple inheritance or mixins
+- `yield` and iterators
+- Regular expressions
+- Symbols (except in `prop` declarations)
+- String interpolation
+
+## Compiling Ruby Contracts
+
+```bash
+runar compile src/contracts/Counter.runar.rb --output ./artifacts
+```
+
+The compiler parses the Ruby source, translates it to the shared IR, and produces the standard JSON artifact format.
+
+To compile all Ruby contracts:
+
+```bash
+runar compile src/contracts/*.runar.rb --output ./artifacts
+```
+
+## Testing Ruby Contracts
+
+Ruby contracts are tested using RSpec. The `runar` gem provides test helpers including `mock_sig`, `mock_pub_key`, and `hash160` utilities. The `Runar::TestKeys` module provides 10 deterministic test keypairs (ALICE through JUDY).
+
+```ruby
+require_relative '../spec_helper'
+require_relative 'P2PKH.runar'
+
+RSpec.describe P2PKH do
+  it 'unlocks with valid signature' do
+    pk = mock_pub_key
+    c = P2PKH.new(hash160(pk))
+    expect { c.unlock(mock_sig, pk) }.not_to raise_error
+  end
+
+  it 'fails with wrong public key' do
+    pk = mock_pub_key
+    wrong_pk = '03' + '00' * 32
+    c = P2PKH.new(hash160(pk))
+    expect { c.unlock(mock_sig, wrong_pk) }.to raise_error(RuntimeError)
+  end
+end
+```
+
+You can also run tests via the Runar CLI:
+
+```bash
+runar test
+```
+
+See [Writing Tests](/docs/testing-and-debugging/writing-tests) for a comprehensive testing guide.
+
+## Next Steps
+
+- [Contract Basics](/docs/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Solidity Contracts](/docs/writing-contracts/solidity-contracts) -- Write contracts in Solidity syntax
+- [Language Feature Matrix](/docs/writing-contracts/language-feature-matrix) -- Compare all eight languages

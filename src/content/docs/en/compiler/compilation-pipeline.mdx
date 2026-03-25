@@ -37,7 +37,7 @@ This contract has one constructor parameter (`pubKeyHash`), one public method (`
 **Input:** Source text in any supported language.
 **Output:** `ContractNode` AST.
 
-The parser reads source code and produces a language-neutral abstract syntax tree. The parser used depends on the source language -- ts-morph for TypeScript, hand-written recursive descent parsers for Solidity, Move, Go, and Rust, and a hand-written tokenizer with recursive descent for Python -- but the output is always the same `ContractNode` structure.
+The parser reads source code and produces a language-neutral abstract syntax tree. The parser used depends on the source language -- ts-morph for TypeScript, hand-written recursive descent parsers for Solidity, Move, Go, Rust, and Zig, and hand-written tokenizers with recursive descent for Python and Ruby -- but the output is always the same `ContractNode` structure.
 
 For our P2PKH contract, the parser produces:
 
@@ -200,7 +200,7 @@ program P2PKH {
 }
 ```
 
-**Why ANF matters.** The ANF representation serves as the **conformance boundary** between the four independent compiler implementations. All four compilers (TypeScript, Go, Rust, Python) must produce byte-identical ANF for the same source contract. The temporaries are numbered sequentially (`t0`, `t1`, `t2`, ...) following a deterministic left-to-right, depth-first traversal of the AST.
+**Why ANF matters.** The ANF representation serves as the **conformance boundary** between the six independent compiler implementations. All six compilers (TypeScript, Go, Rust, Python, Zig, Ruby) must produce byte-identical ANF for the same source contract. The temporaries are numbered sequentially (`t0`, `t1`, `t2`, ...) following a deterministic left-to-right, depth-first traversal of the AST.
 
 Because the ANF is fully flattened and sequential, it maps naturally to a stack machine. Each `let` binding corresponds to pushing a value onto the stack, and each use of a temporary corresponds to picking or rolling a value from a known stack position.
 

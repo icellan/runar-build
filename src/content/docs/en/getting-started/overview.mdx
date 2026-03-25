@@ -6,7 +6,7 @@ order: 10
 lang: "en"
 ---
 
-Rúnar is a smart contract compiler and SDK for Bitcoin SV. It lets you write contracts in familiar programming languages -- TypeScript, Go, Rust, Python, Solidity, or Move -- and compiles them down to Bitcoin Script for deployment on the BSV network.
+Rúnar is a smart contract compiler and SDK for Bitcoin SV. It lets you write contracts in familiar programming languages -- TypeScript, Go, Rust, Python, Zig, Ruby, Solidity, or Move -- and compiles them down to Bitcoin Script for deployment on the BSV network.
 
 Rather than inventing a new domain-specific language, Rúnar meets you where you are. You write contracts in a language you already know, using standard tooling and editors, and the Rúnar compiler handles the translation to Bitcoin Script.
 
@@ -29,7 +29,7 @@ Rúnar abstracts much of this complexity so you can focus on business logic rath
 
 ## Supported Languages
 
-Rúnar supports six language frontends. Each compiles through the same intermediate representation (IR) to produce identical Bitcoin Script output:
+Rúnar supports eight language frontends. Each compiles through the same intermediate representation (IR) to produce identical Bitcoin Script output:
 
 | Language   | File Extension | Runtime Package |
 | ---------- | -------------- | ---------------- |
@@ -37,10 +37,12 @@ Rúnar supports six language frontends. Each compiles through the same intermedi
 | Go         | `.runar.go`    | `runar-go`       |
 | Rust       | `.runar.rs`    | `runar-rs`       |
 | Python     | `.runar.py`    | `runar`          |
+| Zig        | `.runar.zig`   | `runar-zig`      |
+| Ruby       | `.runar.rb`    | `runar-rb`       |
 | Solidity   | `.runar.sol`   | *(built into compiler)* |
 | Move       | `.runar.move`  | *(built into compiler)* |
 
-TypeScript is the primary and most mature frontend. Go, Rust, and Python are stable and conformance-tested. The Solidity and Move frontends are experimental -- they compile contracts correctly but cannot be tested natively in their respective languages (tests must use the TypeScript test runner).
+TypeScript is the primary and most mature frontend. Go, Rust, and Python are stable and conformance-tested. The Zig, Ruby, Solidity, and Move frontends are experimental -- they compile contracts correctly but cannot be tested natively in their respective languages (tests must use the TypeScript test runner).
 
 ## Key Properties
 
@@ -49,7 +51,7 @@ Rúnar's compiler provides several guarantees that are critical for on-chain cod
 - **Deterministic compilation.** The same source code always produces the exact same Bitcoin Script output, byte-for-byte. This is essential for contract verification and reproducible builds.
 - **Type safety.** All contract parameters, method arguments, and return values are statically typed. Type errors are caught at compile time, not at deployment.
 - **Termination guaranteed.** Bitcoin Script is not Turing-complete by design. Every Rúnar contract is guaranteed to terminate -- there are no infinite loops or unbounded recursion.
-- **Conformance-verified.** The four compiler implementations (TypeScript, Go, Rust, Python) are tested against a shared conformance suite. A contract compiled with `runar-go` produces the same script as the same contract compiled with `runar-rs`.
+- **Conformance-verified.** The six compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby) are tested against a shared conformance suite. A contract compiled with `runar-go` produces the same script as the same contract compiled with `runar-rs`.
 
 ## Contract Models
 

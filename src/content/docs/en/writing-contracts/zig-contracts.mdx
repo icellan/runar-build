@@ -1,0 +1,433 @@
+---
+title: "Zig Contracts"
+description: "Writing contracts in Zig."
+section: "writing-contracts"
+order: 47
+lang: "en"
+---
+
+Zig contracts in Runar leverage Zig's compile-time safety and zero-overhead abstractions to produce reliable Bitcoin Script. Contracts are defined as Zig structs with a `Contract` constant that specifies the base type, and compiled through the same intermediate representation as all other Runar languages, producing identical Bitcoin Script output.
+
+> **Status:** Experimental — The Zig compiler passes all 28 conformance tests and produces byte-identical output to the TypeScript reference compiler. All crypto builtins (EC, BLAKE3, WOTS+, SLH-DSA) are fully implemented. Source maps, FixedArray type resolution, and standalone dead code elimination are supported as of v0.4.1. The `.runar.zig` format is also parsed by the TypeScript compiler frontend.
+
+## Prerequisites
+
+- **Zig 0.14+** installed on your system
+- The `runar-zig` package (available as a Zig dependency when using the Runar CLI with Zig contracts)
+
+## File Extension and Project Structure
+
+Zig contract files use the `.runar.zig` extension. Each contract is a single file containing one public struct:
+
+```
+contracts/
+  P2PKH.runar.zig
+  Counter.runar.zig
+  Escrow.runar.zig
+  Auction.runar.zig
+```
+
+Every contract file begins with an import from the `runar` package:
+
+```zig
+const runar = @import("runar");
+```
+
+The `runar` package provides the base contract types (`runar.SmartContract`, `runar.StatefulSmartContract`), all on-chain types (`runar.PubKey`, `runar.Sig`, etc.), and all built-in functions (`runar.assert`, `runar.checkSig`, etc.).
+
+## Stateless Contracts
+
+A stateless contract is a Zig struct with `pub const Contract = runar.SmartContract`. All fields are readonly (baked into the locking script at deployment). Public methods are `pub fn` declarations that take `self: *const ContractName`.
+
+### P2PKH in Zig
+
+```zig
+const runar = @import("runar");
+
+pub const P2PKH = struct {
+    pub const Contract = runar.SmartContract;
+
+    pubKeyHash: runar.Addr,
+
+    pub fn init(pubKeyHash: runar.Addr) P2PKH {
+        return .{ .pubKeyHash = pubKeyHash };
+    }
+
+    pub fn unlock(self: *const P2PKH, sig: runar.Sig, pubKey: runar.PubKey) void {
+        runar.assert(runar.bytesEq(runar.hash160(pubKey), self.pubKeyHash));
+        runar.assert(runar.checkSig(sig, pubKey));
+    }
+};
+```
+
+Key points:
+
+- **Struct constant** `pub const Contract = runar.SmartContract` marks the struct as a stateless contract. This replaces class inheritance.
+- **`pub fn`** methods are public entry points. Methods without `pub` are private helpers that get inlined.
+- **`self: *const P2PKH`** -- Stateless methods take a const pointer because the contract state cannot change.
+- **`runar.assert()`** is the assertion function. Every public method must call it at least once.
+- **`init`** is the constructor. It returns a struct literal assigning all fields.
+- **`runar.bytesEq()`** compares byte sequences (ByteString, Addr, PubKey, etc.) for equality.
+
+### Escrow in Zig
+
+```zig
+const runar = @import("runar");
+
+pub const Escrow = struct {
+    pub const Contract = runar.SmartContract;
+
+    buyer: runar.PubKey,
+    seller: runar.PubKey,
+    arbiter: runar.PubKey,
+
+    pub fn init(buyer: runar.PubKey, seller: runar.PubKey, arbiter: runar.PubKey) Escrow {
+        return .{
+            .buyer = buyer,
+            .seller = seller,
+            .arbiter = arbiter,
+        };
+    }
+
+    pub fn release(self: *const Escrow, sellerSig: runar.Sig, arbiterSig: runar.Sig) void {
+        runar.assert(runar.checkSig(sellerSig, self.seller));
+        runar.assert(runar.checkSig(arbiterSig, self.arbiter));
+    }
+
+    pub fn refund(self: *const Escrow, buyerSig: runar.Sig, arbiterSig: runar.Sig) void {
+        runar.assert(runar.checkSig(buyerSig, self.buyer));
+        runar.assert(runar.checkSig(arbiterSig, self.arbiter));
+    }
+};
+```
+
+## Stateful Contracts
+
+A stateful contract uses `pub const Contract = runar.StatefulSmartContract`. Mutable state fields are declared without special annotation (fields with default values using `= value` syntax). Public methods take `self: *ContractName` (mutable pointer) to modify state. The compiler automatically injects preimage verification and state continuation.
+
+### Counter in Zig
+
+```zig
+const runar = @import("runar");
+
+pub const Counter = struct {
+    pub const Contract = runar.StatefulSmartContract;
+
+    count: i64 = 0,
+
+    pub fn init(count: i64) Counter {
+        return .{ .count = count };
+    }
+
+    pub fn increment(self: *Counter) void {
+        self.count += 1;
+    }
+
+    pub fn decrement(self: *Counter) void {
+        runar.assert(self.count > 0);
+        self.count -= 1;
+    }
+};
+```
+
+When `increment()` is called, the spending transaction must create a new output containing a `Counter` with the updated `count`. The compiler enforces this automatically through the OP_PUSH_TX pattern.
+
+### Auction: Stateful with Context
+
+This example demonstrates a stateful contract that uses `runar.StatefulContext` for preimage introspection, including deadline enforcement via `extractLocktime`.
+
+```zig
+const runar = @import("runar");
+
+pub const Auction = struct {
+    pub const Contract = runar.StatefulSmartContract;
+
+    auctioneer: runar.PubKey,
+    highestBidder: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+    highestBid: i64 = 0,
+    deadline: i64,
+
+    pub fn init(
+        auctioneer: runar.PubKey,
+        highestBidder: runar.PubKey,
+        highestBid: i64,
+        deadline: i64,
+    ) Auction {
+        return .{
+            .auctioneer = auctioneer,
+            .highestBidder = highestBidder,
+            .highestBid = highestBid,
+            .deadline = deadline,
+        };
+    }
+
+    pub fn bid(self: *Auction, ctx: runar.StatefulContext, sig: runar.Sig, bidder: runar.PubKey, bidAmount: i64) void {
+        runar.assert(runar.checkSig(sig, bidder));
+        runar.assert(bidAmount > self.highestBid);
+        runar.assert(runar.extractLocktime(ctx.txPreimage) < self.deadline);
+        self.highestBidder = bidder;
+        self.highestBid = bidAmount;
+    }
+
+    pub fn close(self: *const Auction, ctx: runar.StatefulContext, sig: runar.Sig) void {
+        runar.assert(runar.checkSig(sig, self.auctioneer));
+        runar.assert(runar.extractLocktime(ctx.txPreimage) >= self.deadline);
+    }
+};
+```
+
+Note that `bid` takes `self: *Auction` (mutable -- it updates state), while `close` takes `self: *const Auction` (immutable -- it is a terminal method that does not continue the contract).
+
+## Types in Zig Contracts
+
+The `runar` package provides all on-chain types. Zig's `i64` maps to `bigint` in the compiled output.
+
+| Zig Type | Equivalent TypeScript Type | Description |
+| --- | --- | --- |
+| `i64` | `bigint` | Integer values. The only numeric type allowed. |
+| `bool` | `boolean` | Boolean values. |
+| `[]const u8` / `runar.ByteString` | `ByteString` | Variable-length byte sequence. |
+| `runar.PubKey` | `PubKey` | 33-byte compressed public key. |
+| `runar.Sig` | `Sig` | DER-encoded signature (affine type -- consumed at most once). |
+| `runar.Sha256` | `Sha256` | 32-byte SHA-256 digest. |
+| `runar.Ripemd160` | `Ripemd160` | 20-byte RIPEMD-160 digest. |
+| `runar.Addr` | `Addr` | 20-byte address. |
+| `runar.SigHashPreimage` | `SigHashPreimage` | Transaction preimage (affine type). |
+| `runar.Point` | `Point` | 64-byte elliptic curve point. |
+| `runar.RabinSig` | `RabinSig` | Rabin signature. |
+| `runar.RabinPubKey` | `RabinPubKey` | Rabin public key. |
+| `runar.Readonly(T)` | N/A | Identity wrapper -- marks a field as explicitly readonly. Compiles away. |
+
+### String Literals as ByteString
+
+In Zig contracts, string literals in double quotes are interpreted as hex-encoded ByteString values:
+
+```zig
+highestBidder: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
+```
+
+### Property Defaults
+
+Zig contracts support default values on struct fields using standard Zig syntax:
+
+```zig
+count: i64 = 0,
+highestBid: i64 = 0,
+```
+
+Fields with defaults are mutable state in stateful contracts. Fields without defaults are readonly and baked into the locking script.
+
+## Built-in Functions
+
+All built-in functions are accessed through the `runar` package. They use camelCase naming, matching the canonical Runar function names.
+
+### Cryptographic Functions
+
+```zig
+runar.checkSig(sig, pubKey)
+runar.checkMultiSig(sigs, pubKeys)
+runar.hash256(data)
+runar.hash160(data)
+runar.sha256(data)
+runar.ripemd160(data)
+runar.checkPreimage(preimage)
+```
+
+### Byte Operations
+
+```zig
+runar.len(data)
+runar.cat(a, b)
+runar.substr(data, start, length)
+runar.left(data, length)
+runar.right(data, length)
+runar.reverseBytes(data)
+runar.toByteString(value)
+runar.bytesEq(a, b)           // byte-level equality comparison
+```
+
+### Conversion Functions
+
+```zig
+runar.num2bin(num, length)
+runar.bin2num(data)
+runar.int2str(num, byteLen)
+```
+
+### Math Functions
+
+```zig
+runar.abs(x)
+runar.min(a, b)
+runar.max(a, b)
+runar.within(x, low, high)
+runar.safediv(a, b)
+runar.safemod(a, b)
+runar.clamp(x, low, high)
+runar.pow(base, exp)
+runar.sqrt(x)
+runar.gcd(a, b)
+runar.mulDiv(value, numerator, denominator)
+runar.percentOf(amount, basisPoints)
+```
+
+### Elliptic Curve Operations
+
+```zig
+runar.ecAdd(p1, p2)
+runar.ecMul(point, scalar)
+runar.ecMulGen(scalar)
+runar.ecNegate(point)
+runar.ecOnCurve(point)
+runar.ecModReduce(scalar)
+runar.ecEncodeCompressed(point)
+runar.ecMakePoint(x, y)
+runar.ecPointX(point)
+runar.ecPointY(point)
+```
+
+### Post-Quantum Functions
+
+```zig
+runar.verifyWOTS(message, sig, pubkey)
+runar.verifySLHDSA_SHA2_128s(message, sig, pubkey)
+// Also: 128f, 192s, 192f, 256s, 256f variants
+```
+
+### Preimage Introspection
+
+```zig
+runar.extractVersion(preimage)
+runar.extractHashPrevouts(preimage)
+runar.extractHashSequence(preimage)
+runar.extractOutpoint(preimage)
+runar.extractInputIndex(preimage)
+runar.extractScriptCode(preimage)
+runar.extractAmount(preimage)
+runar.extractSequence(preimage)
+runar.extractOutputHash(preimage)
+runar.extractOutputs(preimage)
+runar.extractLocktime(preimage)
+runar.extractSigHashType(preimage)
+```
+
+### State and Output Functions
+
+```zig
+runar.buildChangeOutput(pubKeyHash, satoshis)
+runar.assert(condition)
+```
+
+For stateful contracts with `StatefulContext`:
+
+```zig
+// ctx is passed as a parameter of type runar.StatefulContext
+ctx.txPreimage           // access the transaction preimage
+ctx.addOutput(satoshis, .{ .field1 = value1, .field2 = value2 })
+ctx.addRawOutput(satoshis, scriptBytes)
+```
+
+Or via `self` in mutable methods:
+
+```zig
+self.addOutput(satoshis, value)
+self.addRawOutput(satoshis, scriptBytes)
+```
+
+## Control Flow
+
+### Conditionals
+
+Standard Zig `if`/`else` expressions work:
+
+```zig
+if (self.turn == 1) {
+    self.turn = 2;
+} else {
+    self.turn = 1;
+}
+```
+
+### For Loops
+
+Only `for` and `while` loops with compile-time constant bounds are allowed in `.runar.zig` files. The compiler unrolls them:
+
+```zig
+var sum: i64 = 0;
+for (0..10) |i| {
+    sum += balances[i];
+}
+```
+
+### Integer Division
+
+Use `@divTrunc` for integer division:
+
+```zig
+const half = @divTrunc(total, 2);
+```
+
+## Disallowed Zig Features
+
+The following Zig features are not available in contracts:
+
+- Allocators and heap allocation
+- `async`/`await` and suspension
+- Comptime metaprogramming (beyond what Runar uses internally)
+- Error unions and `try`/`catch`
+- Optionals (`?T`)
+- Standard library imports (only `runar` via `@import("runar")` is allowed)
+- Recursion
+- Dynamic arrays and slices (except fixed-size)
+- Pointers (except the method receiver `self`)
+- `while` loops without constant bounds
+- Multiple structs per file (as contracts)
+- Unions and tagged unions
+- `@embedFile`, `@cImport`, and other builtins not supported by Runar
+
+## Compiling Zig Contracts
+
+```bash
+runar compile src/contracts/P2PKH.runar.zig --output ./artifacts
+```
+
+The compiler parses the Zig source, translates it to the shared IR, and produces the standard JSON artifact format identical to all other languages.
+
+To compile all Zig contracts:
+
+```bash
+runar compile src/contracts/*.runar.zig --output ./artifacts
+```
+
+## Testing Zig Contracts
+
+Zig contracts are tested using native Zig tests. You import the contract struct and the `runar` package, then use standard Zig testing assertions. The `runar` package provides `compileCheckSource` and `compileCheckFile` functions to validate that the contract compiles correctly, and test key fixtures (`runar.ALICE`, `runar.BOB`, `runar.CHARLIE`).
+
+```zig
+const std = @import("std");
+const runar = @import("runar");
+const P2PKH = @import("P2PKH.runar.zig").P2PKH;
+
+test "compile-check P2PKH" {
+    try runar.compileCheckSource(std.testing.allocator, @embedFile("P2PKH.runar.zig"), "P2PKH.runar.zig");
+}
+
+test "P2PKH unlock succeeds with matching key" {
+    const contract = P2PKH.init(runar.hash160(runar.ALICE.pubKey));
+    contract.unlock(runar.signTestMessage(runar.ALICE), runar.ALICE.pubKey);
+}
+```
+
+You can also run tests via the Runar CLI:
+
+```bash
+runar test
+```
+
+See [Writing Tests](/docs/testing-and-debugging/writing-tests) for a comprehensive testing guide.
+
+## Next Steps
+
+- [Contract Basics](/docs/writing-contracts/contract-basics) -- Full reference on types, built-ins, and constraints
+- [Ruby Contracts](/docs/writing-contracts/ruby-contracts) -- Write contracts in Ruby
+- [Language Feature Matrix](/docs/writing-contracts/language-feature-matrix) -- Compare all eight languages

@@ -39,6 +39,8 @@ export const docsNavigation: NavSection[] = [
       { title: 'Go Contracts', slug: 'go-contracts' },
       { title: 'Rust Contracts', slug: 'rust-contracts' },
       { title: 'Python Contracts', slug: 'python-contracts' },
+      { title: 'Zig Contracts', slug: 'zig-contracts' },
+      { title: 'Ruby Contracts', slug: 'ruby-contracts' },
       { title: 'Solidity Contracts', slug: 'solidity-contracts' },
       { title: 'Move Contracts', slug: 'move-contracts' },
       { title: 'Language Feature Matrix', slug: 'language-feature-matrix' },
@@ -123,6 +125,16 @@ export const docsNavigation: NavSection[] = [
       { title: 'Auction', slug: 'auction' },
       { title: 'Blackjack Betting', slug: 'blackjack-betting' },
       { title: 'Price Bet', slug: 'price-bet' },
+    ],
+  },
+  {
+    title: 'Changelog',
+    key: 'changelog',
+    items: [
+      { title: 'Release History', slug: 'index' },
+      { title: 'v0.4.x', slug: 'v0-4' },
+      { title: 'v0.3.x', slug: 'v0-3' },
+      { title: 'v0.2.0', slug: 'v0-2' },
     ],
   },
 ];

@@ -18,14 +18,14 @@ Traditional compilers often use a small number of large, monolithic passes that 
 
 **Multi-language support.** The nanopass design cleanly separates the language-specific frontend (parsing) from the language-agnostic backend (everything after the AST). This means adding a new source language only requires writing a new parser -- all downstream passes are shared.
 
-**Reproducibility.** The pipeline has a clearly defined **conformance boundary** at the ANF IR stage. All four independent compiler implementations (TypeScript, Go, Rust, Python) must produce byte-identical ANF output for the same source contract. This is the foundation of Runar's cross-compiler verification guarantee.
+**Reproducibility.** The pipeline has a clearly defined **conformance boundary** at the ANF IR stage. All six independent compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby) must produce byte-identical ANF output for the same source contract. This is the foundation of Runar's cross-compiler verification guarantee.
 
 ## High-Level Architecture
 
 The compiler pipeline consists of six sequential passes:
 
 ```
-Source Code (TS / Go / Rust / Python)
+Source Code (TS / Go / Rust / Python / Zig / Ruby)
         |
    [1] Parse        -- Source text to Runar AST (ContractNode)
         |
@@ -56,6 +56,8 @@ The parsing pass is the only language-specific component in the entire pipeline.
 | Go              | Hand-written recursive descent | 01-parse-go.ts       |
 | Rust            | Hand-written recursive descent | 01-parse-rust.ts     |
 | Python          | Hand-written tokenizer + recursive descent | 01-parse-python.ts |
+| Zig             | Hand-written recursive descent | Zig compiler       |
+| Ruby            | Hand-written tokenizer + recursive descent | Ruby compiler      |
 
 The `ContractNode` AST is a language-neutral representation of a Runar contract. It captures the contract name, constructor parameters, state fields, and public methods with their parameter lists and body statements. Language-specific syntax is erased at this stage -- a TypeScript contract and a Go contract that define the same logic produce identical ASTs.
 
@@ -65,7 +67,7 @@ This design means that the validation, type-checking, ANF lowering, stack loweri
 
 The most important architectural decision in the Runar compiler is the **conformance boundary** at the ANF IR stage (between passes 4 and 5).
 
-Runar is implemented as four independent compilers in four different languages. These compilers are developed by different teams and use different parser technologies. But they must all produce the same Bitcoin Script for the same source contract. The conformance boundary enforces this.
+Runar is implemented as six independent compilers in six different languages. These compilers are developed by different teams and use different parser technologies. But they must all produce the same Bitcoin Script for the same source contract. The conformance boundary enforces this.
 
 After pass 4, every compiler must produce **byte-identical ANF output** for a given source contract. The ANF representation is deterministic and fully specified: every sub-expression is bound to a sequential temporary (`t0`, `t1`, `t2`, ...), and the ordering is defined by a canonical traversal of the AST.
 
@@ -120,7 +122,7 @@ The final emission pass converts Stack IR into Bitcoin Script hex. Key behaviors
 
 ## Compiler Implementations
 
-Runar maintains four independent compiler implementations:
+Runar maintains six independent compiler implementations:
 
 | Implementation | Directory | Language   | Primary Use Case                          |
 | -------------- | --------- | ---------- | ----------------------------------------- |
@@ -128,10 +130,12 @@ Runar maintains four independent compiler implementations:
 | runar-go       | compilers/ | Go         | High-performance server-side compilation  |
 | runar-rs       | compilers/ | Rust       | Embedded and WASM compilation             |
 | runar-py       | compilers/ | Python     | Research, prototyping, Jupyter notebooks  |
+| runar-zig      | compilers/zig/ | Zig 0.14   | 18K LOC                                   |
+| runar-rb       | compilers/ruby/ | Ruby 3.0   | 16K LOC                                   |
 
 The names `runar-go`, `runar-rs`, and `runar-py` refer to the packages/ directory entries; the actual Go, Rust, and Python compiler frontends live in compilers/.
 
-All four implementations share the same test suite of conformance vectors. A conformance vector is a pair of (source contract, expected ANF output). Any implementation that passes all conformance vectors is guaranteed to produce identical Bitcoin Script.
+All six implementations share the same test suite of conformance vectors. A conformance vector is a pair of (source contract, expected ANF output). Any implementation that passes all conformance vectors is guaranteed to produce identical Bitcoin Script.
 
 ## What's Next
 

@@ -29,7 +29,7 @@ runar codegen <artifacts...> [-o <dir>] [-l <lang>]
 | `-o, --output <dir>` | Output directory for generated files. | Same directory as the artifact |
 | `-l, --lang <lang>` | Target language. | `ts` |
 
-**Supported languages:** `ts`, `go`, `rust`, `python`
+**Supported languages:** `ts`, `go`, `rust`, `python`, `ruby`
 
 ### Examples
 
@@ -55,6 +55,7 @@ The output filename is derived from the `contractName` field in the artifact:
 | `go` | snake_case + `_contract` | `escrow_contract.go` |
 | `rust` | snake_case + `_contract` | `escrow_contract.rs` |
 | `python` | snake_case + `_contract` | `escrow_contract.py` |
+| `ruby` | `{contract_name}_wrapper.rb` | `escrow_wrapper.rb` |
 
 ## Programmatic API
 
@@ -263,20 +264,20 @@ contract.connect(provider, signer);
 
 The following table shows how ABI types are mapped to each target language:
 
-| ABI Type | TypeScript | Go | Rust | Python |
-| -------- | ---------- | -- | ---- | ------ |
-| `bigint` | `bigint` | `*big.Int` | `BigInt` | `int` |
-| `boolean` | `boolean` | `bool` | `bool` | `bool` |
-| `Sig` | `string \| null` | `string` | `String` | `str` |
-| `PubKey` | `string \| null` | `string` | `String` | `str` |
-| `ByteString` | `string` | `string` | `String` | `str` |
-| `Addr` | `string` | `string` | `String` | `str` |
-| `Ripemd160` | `string` | `string` | `String` | `str` |
-| `Sha256` | `string` | `string` | `String` | `str` |
-| `Point` | `string` | `string` | `String` | `str` |
-| `SigHashPreimage` | `string \| null` | `string` | `String` | `str` |
+| ABI Type | TypeScript | Go | Rust | Python | Ruby |
+| -------- | ---------- | -- | ---- | ------ | ---- |
+| `bigint` | `bigint` | `*big.Int` | `BigInt` | `int` | `Bigint` |
+| `boolean` | `boolean` | `bool` | `bool` | `bool` | `Boolean` |
+| `Sig` | `string \| null` | `string` | `String` | `str` | `Sig` |
+| `PubKey` | `string \| null` | `string` | `String` | `str` | `PubKey` |
+| `ByteString` | `string` | `string` | `String` | `str` | `ByteString` |
+| `Addr` | `string` | `string` | `String` | `str` | `String` |
+| `Ripemd160` | `string` | `string` | `String` | `str` | `String` |
+| `Sha256` | `string` | `string` | `String` | `str` | `String` |
+| `Point` | `string` | `string` | `String` | `str` | `String` |
+| `SigHashPreimage` | `string \| null` | `string` | `String` | `str` | `SigHashPreimage` |
 
-Unknown types fall back to `unknown` (TypeScript), `interface{}` (Go), `SdkValue` (Rust), or `Any` (Python).
+Unknown types fall back to `unknown` (TypeScript), `interface{}` (Go), `SdkValue` (Rust), `Any` (Python), or `Object` (Ruby).
 
 ## Template System
 

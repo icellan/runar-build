@@ -6,7 +6,7 @@ Documentation and landing page for the [Rúnar](https://github.com/icellan/runar
 
 ## What is Rúnar?
 
-Rúnar is a multi-language smart contract compiler for Bitcoin SV. It compiles contracts written in TypeScript, Go, Rust, Python, Solidity, and Move into optimized Bitcoin Script through a 6-pass nanopass pipeline. All languages produce byte-identical output for the same contract logic.
+Rúnar is a multi-language smart contract compiler for Bitcoin SV. It compiles contracts written in TypeScript, Go, Rust, Python, Zig, Ruby, Solidity, and Move into optimized Bitcoin Script through a 6-pass nanopass pipeline. All languages produce byte-identical output for the same contract logic.
 
 ### Related Projects
 
@@ -21,7 +21,7 @@ This repository contains the source for the Rúnar documentation site at [runar.
 
 - **Getting Started** — Installation, quick start, project structure
 - **Bitcoin & BSV Basics** — UTXO model, Bitcoin Script, transactions
-- **Writing Contracts** — Language-specific guides for all six supported languages, plus a feature matrix
+- **Writing Contracts** — Language-specific guides for all eight supported languages, plus a feature matrix
 - **The Compiler** — Architecture, compilation pipeline, configuration, output artifacts
 - **The SDK** — Deploying, calling, multi-signer, stateful contracts, token contracts, wallet integration
 - **Testing & Debugging** — Test runner, fixtures, mocks, fuzzing, debugging compiled script

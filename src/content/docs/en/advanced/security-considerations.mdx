@@ -61,6 +61,8 @@ Runar does not support unbounded loops, recursion, or any form of unbounded comp
 
 This eliminates denial-of-service attacks based on non-terminating scripts. It also means that script execution time and cost are bounded and predictable.
 
+The ANF interpreter used for offline state simulation caps loop iterations at 65,536 to prevent denial-of-service in development tooling.
+
 ### Maximum Stack Depth
 
 Bitcoin Script (and therefore Runar) enforces a maximum stack depth of **800 elements**. The compiler performs static analysis to estimate maximum stack usage and warns when a contract approaches this limit. At runtime, exceeding 800 elements causes immediate script failure.
